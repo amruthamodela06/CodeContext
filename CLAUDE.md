@@ -17,7 +17,7 @@ This is a portfolio project. **Rigor and quality matter more than feature count.
 ## Project layout
 
 ```
-backend/        Python 3.12 + FastAPI. uv for deps.
+backend/        Python >=3.12 (currently 3.14) + FastAPI. uv for deps.
 frontend/      Next.js 14 (App Router) + TS + Tailwind.
 eval/          Evaluation harness and datasets. Separate from app code.
 infra/         docker-compose for local dev (Postgres + pgvector).
@@ -99,6 +99,7 @@ If a request seems to push past these guardrails, flag it and ask before proceed
 
 These are settled. Don't re-litigate without a written ADR.
 
+- **Python runtime**: `>=3.12` (currently 3.14 via `uv`). Floor pin, not exact; uv lockfile + `.python-version` give reproducibility.
 - **Database**: Postgres + pgvector (single DB for structured + vector data)
 - **Parsing**: tree-sitter for AST extraction
 - **Embeddings**: OpenAI `text-embedding-3-small` (deployed); open-source models benchmarked in eval

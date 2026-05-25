@@ -1,0 +1,30 @@
+# Local dev infrastructure for CodeContext.
+# Single service: Postgres + pgvector. Started via `make db-up`.
+#
+# Credentials are dev-only and hardcoded; see .env.example for the matching
+# DATABASE_URL the backend uses to connect.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: codecontext_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: codecontext
+      POSTGRES_PASSWORD: codecontext
+      POSTGRES_DB: codecontext
+    ports:
+      # Host port is 5433 (not 5432) because a system Postgres service is often
+      # already bound to 5432 on Windows dev machines. DATABASE_URL in .env
+      # must point at the host port (5433).
+      - "5433:5432"
+    volumes:
+      - codecontext_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codecontext -d codecontext"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  codecontext_db_data:
