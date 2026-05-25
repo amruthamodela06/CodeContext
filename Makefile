@@ -2,7 +2,17 @@
 .PHONY: help dev test lint eval ingest db-up db-down db-migrate backend-dev
 
 help: ## Show this help
-	@awk 'BEGIN {FS = ":.*##"; printf "CodeContext targets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  %-20s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+	@echo CodeContext targets:
+	@echo   help          Show this help
+	@echo   dev           Start backend + frontend + Postgres (Checkpoint E)
+	@echo   test          Run all backend tests
+	@echo   lint          Run ruff (tsc added in Checkpoint E)
+	@echo   eval          Run the evaluation harness (later slice)
+	@echo   ingest        Ingest a repo from CLI (Checkpoint C)
+	@echo   db-up         Start Postgres + pgvector
+	@echo   db-down       Stop the dev database
+	@echo   db-migrate    Apply Alembic migrations
+	@echo   backend-dev   Run the backend with --reload on 0.0.0.0:8000
 
 ## --- User-facing (per CLAUDE.md) ---
 
