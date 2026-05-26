@@ -14,7 +14,7 @@ This ADR establishes the baseline conventions every subsequent ADR can assume.
 ### Stack (per PRD §9)
 
 - **Backend**: Python `>=3.12` (currently 3.14 via uv-managed install; floor pin, not exact), FastAPI, SQLAlchemy 2.0 (async style), asyncpg, Alembic, Pydantic v2. Deps managed with `uv`.
-- **Frontend**: Next.js 14 (App Router), TypeScript strict, Tailwind. Server components by default; client components only when interactivity is required.
+- **Frontend**: Next.js `>=14` (currently 16 via `pnpm create next-app@latest`; floor pin, not exact), React 19, TypeScript strict, Tailwind 4. App Router. Server components by default; client components only when interactivity is required.
 - **Storage**: Postgres 16 + pgvector. Single database for structured rows and vector embeddings.
 - **Tooling**: `ruff` for Python lint+format. `tsc` for TypeScript type-check. `pytest` (+ `pytest-asyncio`) for backend tests.
 

@@ -6,18 +6,36 @@ This is a v1 portfolio project under active development. See [docs/PRD.md](docs/
 
 ## Status
 
-**Slice 1 (current):** repo ingestion + file list. No embeddings, no RAG, no LLM yet.
+**Slice 1 (current):** repo ingestion + file list — backend (`POST /ingest`, `GET /repos/{owner}/{name}/files`) and a minimal Next.js UI. No embeddings, no RAG, no LLM yet.
 
 ## Quick start
 
-Quick-start instructions will be filled in as Slice 1 services come online. The intended interface (see [CLAUDE.md](CLAUDE.md) §"Common commands") is:
+Prereqs (Windows; install paths in parens): **docker** (Desktop), **uv** (`winget install astral-sh.uv`), **GNU make** (`winget install ezwinports.make`), **Node ≥18** (`winget install OpenJS.NodeJS.LTS`), **pnpm** (`npm install -g pnpm`). After a fresh install, restart your terminal (or VSCode) so the new tools are on PATH.
+
+One-time per clone:
 
 ```bash
-make dev      # start backend + frontend + Postgres
-make test     # run all tests
-make lint     # ruff + tsc
-make eval     # evaluation harness (later slice)
-make ingest REPO=owner/name   # ingest a repo from the CLI
+cp .env.example .env
+make db-up && make db-migrate
+cd backend && uv sync     # creates the backend venv, downloads Python 3.12+
+cd ../frontend && pnpm install
+```
+
+Day-to-day (three terminals — `make dev` is intentionally not wired yet, see [Makefile](Makefile)):
+
+```bash
+make db-up         # terminal 1 — Postgres + pgvector (or leave running in the background)
+make backend-dev   # terminal 2 — FastAPI on http://localhost:8000
+make frontend-dev  # terminal 3 — Next.js on http://localhost:3000
+```
+
+Other targets:
+
+```bash
+make test     # 56 backend tests (uses an isolated codecontext_test DB)
+make lint     # ruff (backend) + tsc + eslint (frontend)
+make eval     # evaluation harness (Slice 2)
+make ingest REPO=owner/name   # CLI ingestion (Slice 2)
 ```
 
 ## Architecture

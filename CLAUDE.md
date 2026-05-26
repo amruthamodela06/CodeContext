@@ -9,7 +9,7 @@ This is a portfolio project. **Rigor and quality matter more than feature count.
 ## Status
 
 - **Phase**: v1 development
-- **Current slice**: Slice 1 — ingestion + file list (no embeddings, no RAG, no LLM)
+- **Current slice**: Slice 1 complete — ingestion + file list, end-to-end through the Next.js UI. Slice 2 TBD (PRD §11 week 2 is AST chunking + hybrid retrieval + citations).
 - **Flagship eval repo**: FastAPI (`tiangolo/fastapi`)
 
 ---
@@ -18,7 +18,7 @@ This is a portfolio project. **Rigor and quality matter more than feature count.
 
 ```
 backend/        Python >=3.12 (currently 3.14) + FastAPI. uv for deps.
-frontend/      Next.js 14 (App Router) + TS + Tailwind.
+frontend/      Next.js >=14 (currently 16) + React 19 + TS + Tailwind 4. App Router. pnpm.
 eval/          Evaluation harness and datasets. Separate from app code.
 infra/         docker-compose for local dev (Postgres + pgvector).
 docs/          PRD, architecture notes, decisions/ (ADRs).

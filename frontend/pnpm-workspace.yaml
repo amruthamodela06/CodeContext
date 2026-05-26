@@ -1,0 +1,7 @@
+# pnpm 11 reads per-project settings from this file even for single-package
+# projects. Approve native-binding build scripts for these trusted deps:
+#   - sharp: Vercel's image-optimization library (used by next/image)
+#   - unrs-resolver: the Rust-backed resolver behind eslint-plugin-import
+allowBuilds:
+  sharp: true
+  unrs-resolver: true
