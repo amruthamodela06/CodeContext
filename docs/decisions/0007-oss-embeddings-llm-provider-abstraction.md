@@ -34,6 +34,15 @@ Use **Gemini 2.0 Flash via the free tier** as the deployed default. Wrap behind 
 
 Provider chosen via the `LLM_PROVIDER` env variable. **All providers must support streaming** (server-sent events to the UI). Accessed via the OpenAI-compatible SDK pattern — each provider's compatibility shim, or a thin adapter — so client code is the same shape across providers.
 
+### Env-variable contract
+
+Both interfaces resolve their concrete implementation from environment at startup:
+
+- `LLM_PROVIDER` — one of `gemini` (default), `openai`, `anthropic`, `ollama`.
+- `EMBEDDING_PROVIDER` — one of `bge` (default), `openai`, `voyage`, `ollama`.
+
+Per-provider credentials live in their own env vars (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, `OLLAMA_BASE_URL`). Loaded via `pydantic-settings`; only the credentials matching the selected provider are validated as required at startup.
+
 ## Consequences
 
 **Upside**

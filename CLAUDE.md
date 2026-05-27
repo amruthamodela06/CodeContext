@@ -140,6 +140,8 @@ make ingest REPO=…  # ingest a specific repo from CLI
 ## Things to ask me about, not assume
 
 - Anything that touches cost (API spend, infra, storage)
+- Anything that **assumes GPU availability** — dev box is CPU-only (Ryzen 5 7535HS, integrated Radeon 660M, 16 GB RAM). See PRD §9 dev-env notes.
+- Anything that **escapes the free-tier default providers** for the deployed path (i.e., escalates to a paid OpenAI/Anthropic/Voyage API for the default `LLM_PROVIDER` or `EMBEDDING_PROVIDER`). Paid providers are for ablation only. See ADR 0007.
 - Anything that changes the public API surface
 - Anything that requires a new third-party service
 - Anything that breaks an existing test
