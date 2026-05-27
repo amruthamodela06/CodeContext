@@ -96,10 +96,12 @@ The "why" information exists — it's in commit messages, PR descriptions, issue
 
 ### 6.6 Cost controls
 
-- Anonymous users: 20 queries per day, can only query pre-indexed popular repos
-- Signed-in users (GitHub OAuth, public repo scope): 50 queries per day, can ingest any in-scope repo
-- BYO-API-key users: unlimited queries, ingest unlimited repos
-- All limits visible and explained in-app
+The default deployment uses free-tier providers (Gemini 2.0 Flash for the LLM, local `bge-base-en-v1.5` for embeddings — see §9 and ADR 0007). The per-tier limits below exist primarily to protect the *shared* Gemini free-tier quota from being exhausted by one user, not to manage paid-API spend on the default path.
+
+- **Anonymous users:** 20 queries per day. Can only query pre-indexed popular repos.
+- **Signed-in users** (GitHub OAuth, public repo scope): 50 queries per day. Can ingest any in-scope repo.
+- **BYO-provider users:** bring your own `LLMProvider` configuration (OpenAI, Anthropic, Gemini paid tier, or self-hosted Ollama). Unlimited queries against your own quota; you pay your own provider's cost.
+- All limits visible and explained in-app.
 
 ## 7. Non-functional requirements
 
@@ -108,7 +110,7 @@ The "why" information exists — it's in commit messages, PR descriptions, issue
 - Retrieval quality: recall@5 ≥ 0.75 on the flagship-repo evaluation set
 - Citation accuracy: ≥ 90% of citations point to real, relevant locations
 - Uptime: best-effort 99% (this is a portfolio project, not an SLA product)
-- Cost ceiling: total infra + API cost per active user per month < $0.50 at expected v1 traffic (achievable via pre-indexing + caching + rate limits)
+- Cost ceiling: total infra + API cost per active user per month < $0.10 at expected v1 traffic. Achievable because the default `LLMProvider` (Gemini Flash free tier) and `Embedder` (local `bge-base-en-v1.5`) are zero-marginal-cost; remaining cost is small infra (Railway / Fly free or near-free tier). The $0.10 ceiling is defensive in case any portion of the path escapes to a paid provider.
 
 ## 8. Evaluation plan
 
@@ -130,15 +132,31 @@ The evaluation framework is a first-class deliverable, not an afterthought. It's
 
 ## 9. Technical architecture
 
-- **Backend:** Python 3.12 + FastAPI. Async ingestion workers (background tasks or a job queue like RQ for v1).
-- **Storage:** Postgres with pgvector for both structured data (repos, files, commits, PRs, issues) and vector embeddings (code chunks, commit messages, PR/issue text). Single-database simplicity for v1.
-- **Parsing:** tree-sitter (multi-language) for AST extraction and chunking. Languages supported in v1: Python, TypeScript/JavaScript, Go, Rust.
-- **Embedding:** OpenAI text-embedding-3-small for the deployed version; open-source alternative (e.g., bge-small-en or jina-embeddings-v2-code) benchmarked in eval for comparison.
-- **Retrieval:** Hybrid — Postgres full-text search (BM25-equivalent via ts_rank) plus pgvector cosine similarity, fused with reciprocal rank fusion. Optional cross-encoder reranker (e.g., bge-reranker-base) on top-k results.
-- **LLM:** GPT-4o-mini for the deployed version (cost/quality balance); ablation against a self-hosted small model for the eval section.
-- **Frontend:** Next.js 14 (App Router), Tailwind, Monaco for code rendering in citations, server-sent events for streaming answers.
-- **Deployment:** Frontend on Vercel, backend on Railway or Fly.io, Postgres on Neon or Supabase. Custom domain.
-- **Observability:** Basic logging (structured JSON), query/feedback events to Postgres, no third-party analytics in v1.
+**Backend**: Python `>=3.12` (currently 3.14 via uv-managed install) + FastAPI. `uv` for dependency management. Async ingestion workers via background tasks (RQ or arq if we outgrow background tasks).
+
+**Storage**: Postgres with pgvector for both structured data (repos, files, commits, PRs, issues) and vector embeddings (code chunks, commit messages, PR/issue text). Single-database simplicity for v1.
+
+**Parsing**: tree-sitter (multi-language) for AST extraction and chunking. Languages supported in v1: Python, TypeScript/JavaScript, Go, Rust (in that priority order).
+
+**Embeddings**: `bge-base-en-v1.5` via `sentence-transformers`, running in-process in the Python backend on CPU. No API dependency, no cost, fast enough for v1 corpus sizes. Embedding model is abstracted behind an `Embedder` interface so it can be swapped (e.g., to OpenAI `text-embedding-3-small`, Voyage `voyage-code-2`, or Ollama `nomic-embed-text`) for the ablation study.
+
+**LLM**: Gemini 2.0 Flash via the free tier as the default. Accessed via the OpenAI-compatible SDK pattern (Google's `openai`-compatible endpoint or a thin adapter) so the same client code works across providers. The LLM is abstracted behind an `LLMProvider` interface with these implementations:
+- `gemini` (default, free tier)
+- `openai` (GPT-4o-mini, paid, used for ablation)
+- `anthropic` (Claude Haiku/Sonnet, paid, used for ablation)
+- `ollama` (local Qwen 2.5 Coder 3B Instruct, CPU inference, used for offline development and ablation)
+
+Provider selected via `LLM_PROVIDER` env variable. All providers must support streaming.
+
+**Retrieval**: Hybrid — Postgres full-text search (BM25-equivalent via `ts_rank`) plus pgvector cosine similarity, fused with reciprocal rank fusion. Optional cross-encoder reranker (`bge-reranker-base`, CPU) on top-k results.
+
+**Frontend**: Next.js `>=14` (currently 16), React 19, Tailwind 4, TypeScript strict. App Router. Monaco for code rendering in citations. Server-sent events for streaming answers.
+
+**Deployment**: Frontend on Vercel, backend on Railway or Fly.io, Postgres on Neon or Supabase. Custom domain.
+
+**Observability**: Basic structured JSON logging, query/feedback events to Postgres, no third-party analytics in v1.
+
+**Dev environment notes**: Primary dev machine is Windows 11 on an AMD Ryzen 5 7535HS (integrated Radeon 660M, 16GB RAM). All local inference runs on CPU; no GPU acceleration assumed. Ollama is used for offline development and as one ablation data point — not as the production default.
 
 ## 10. Risks and mitigations
 
