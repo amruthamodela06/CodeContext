@@ -1,16 +1,29 @@
+import asyncio
 import logging
 import subprocess
+import tempfile
+from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.chunking.orchestrator import chunk_repo
 from app.db import get_session
-from app.ingest import MAX_FILE_COUNT, FileCountExceededError, ingest_repo
-from app.models import Repo
-from app.schemas import FileOut, IngestRequest, RepoFilesResponse, RepoOut
+from app.ingest import MAX_FILE_COUNT, FileCountExceededError, clone_repo, ingest_repo
+from app.models import CodeChunk, Repo
+from app.schemas import (
+    ChunkOut,
+    ChunkSummary,
+    ChunkTriggerResponse,
+    FileOut,
+    IngestRequest,
+    RepoChunksResponse,
+    RepoFilesResponse,
+    RepoOut,
+)
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -18,14 +31,39 @@ router = APIRouter()
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 
-def _serialize(repo: Repo) -> RepoFilesResponse:
-    """Build the response from a loaded Repo + its files relationship."""
+# --- Helpers --------------------------------------------------------------
+
+
+async def _chunk_counts_by_file(repo_id: int, session: AsyncSession) -> dict[int, int]:
+    """Return {file_id: chunk_count} for chunks belonging to this repo."""
+    rows = await session.execute(
+        select(CodeChunk.file_id, func.count(CodeChunk.id))
+        .where(CodeChunk.repo_id == repo_id)
+        .group_by(CodeChunk.file_id)
+    )
+    return dict(rows.all())
+
+
+async def _serialize(repo: Repo, session: AsyncSession) -> RepoFilesResponse:
+    """Build the file-list response, merging in per-file chunk counts."""
+    counts = await _chunk_counts_by_file(repo.id, session)
     files = sorted(repo.files, key=lambda f: f.path)
     return RepoFilesResponse(
         repo=RepoOut.model_validate(repo),
-        files=[FileOut.model_validate(f) for f in files],
+        files=[
+            FileOut(
+                path=f.path,
+                size_bytes=f.size_bytes,
+                language=f.language,
+                chunk_count=counts.get(f.id, 0),
+            )
+            for f in files
+        ],
         file_count=len(files),
     )
+
+
+# --- Ingest + files (Slice 1) --------------------------------------------
 
 
 @router.post("/ingest", response_model=RepoFilesResponse)
@@ -48,7 +86,7 @@ async def ingest(
             status.HTTP_502_BAD_GATEWAY,
             detail="git clone failed; check the URL and that the repo is public.",
         ) from e
-    return _serialize(repo)
+    return await _serialize(repo, session)
 
 
 @router.get("/repos/{owner}/{name}/files", response_model=RepoFilesResponse)
@@ -65,4 +103,107 @@ async def list_files(
             status.HTTP_404_NOT_FOUND,
             detail=f"repo {owner}/{name} not ingested",
         )
-    return _serialize(repo)
+    return await _serialize(repo, session)
+
+
+# --- Chunks (Slice 2) -----------------------------------------------------
+
+
+@router.post(
+    "/repos/{repo_id}/chunk",
+    response_model=ChunkTriggerResponse,
+    description=(
+        "Re-clone the repo and run the chunker. Idempotent — existing chunks "
+        "for the repo are deleted first. Used to retry a failed auto-chunk "
+        "or after changing chunking rules."
+    ),
+)
+async def trigger_chunk(
+    repo_id: int,
+    session: SessionDep,
+) -> ChunkTriggerResponse:
+    repo = await session.scalar(
+        select(Repo).where(Repo.id == repo_id).options(selectinload(Repo.files))
+    )
+    if repo is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"repo id={repo_id} not found")
+
+    clone_url = f"https://github.com/{repo.owner}/{repo.name}.git"
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        dest = Path(tmp) / "repo"
+        try:
+            await asyncio.to_thread(clone_repo, clone_url, dest)
+        except subprocess.CalledProcessError as e:
+            log.warning("re-clone for chunking failed: %s", (e.stderr or "").strip())
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                detail="git clone failed; the repo may have been removed or made private.",
+            ) from e
+        count = await chunk_repo(repo, dest, session)
+
+    return ChunkTriggerResponse(repo_id=repo_id, chunk_count=count)
+
+
+@router.get("/repos/{repo_id}/chunks", response_model=RepoChunksResponse)
+async def list_chunks(
+    repo_id: int,
+    session: SessionDep,
+    chunk_type: Annotated[str | None, Query(description="Filter by chunk_type")] = None,
+    language: Annotated[str | None, Query(description="Filter by language")] = None,
+    file_id: Annotated[int | None, Query(description="Filter by file id")] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> RepoChunksResponse:
+    repo = await session.get(Repo, repo_id)
+    if repo is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"repo id={repo_id} not found")
+
+    filters = [CodeChunk.repo_id == repo_id]
+    if chunk_type:
+        filters.append(CodeChunk.chunk_type == chunk_type)
+    if language:
+        filters.append(CodeChunk.language == language)
+    if file_id is not None:
+        filters.append(CodeChunk.file_id == file_id)
+
+    total = await session.scalar(select(func.count(CodeChunk.id)).where(*filters))
+
+    page = await session.execute(
+        select(CodeChunk)
+        .where(*filters)
+        .order_by(CodeChunk.file_id, CodeChunk.start_line)
+        .limit(limit)
+        .offset(offset)
+    )
+    chunks = list(page.scalars().all())
+
+    by_type_rows = await session.execute(
+        select(CodeChunk.chunk_type, func.count(CodeChunk.id))
+        .where(*filters)
+        .group_by(CodeChunk.chunk_type)
+    )
+    by_lang_rows = await session.execute(
+        select(CodeChunk.language, func.count(CodeChunk.id))
+        .where(*filters)
+        .group_by(CodeChunk.language)
+    )
+
+    return RepoChunksResponse(
+        repo_id=repo_id,
+        chunks=[ChunkOut.model_validate(c) for c in chunks],
+        total=total or 0,
+        limit=limit,
+        offset=offset,
+        summary=ChunkSummary(
+            by_type=dict(by_type_rows.all()),
+            by_language=dict(by_lang_rows.all()),
+        ),
+    )
+
+
+@router.get("/chunks/{chunk_id}", response_model=ChunkOut)
+async def get_chunk(chunk_id: int, session: SessionDep) -> ChunkOut:
+    chunk = await session.get(CodeChunk, chunk_id)
+    if chunk is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"chunk id={chunk_id} not found")
+    return ChunkOut.model_validate(chunk)

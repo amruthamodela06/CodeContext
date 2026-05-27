@@ -13,6 +13,9 @@ readme = "README.md"
 #   pydantic             — validation + serialization (request/response schemas)
 #   pydantic-settings    — env-based config via .env (12-factor)
 #   alembic              — schema migrations (ADR-0001)
+#   tree-sitter-language-pack — AST grammars for Python (ADR-0008); stubs for
+#                          TS/JS/Go/Rust ship in the same package. Pre-built
+#                          cp310-abi3 wheels work on Python 3.14.
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -21,6 +24,7 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "alembic>=1.13",
+    "tree-sitter-language-pack>=1.8.1",
 ]
 
 # Dev dependencies (PEP 735 dependency-groups, the modern uv-recommended form).
@@ -45,6 +49,9 @@ package = false
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+# Test fixtures hold intentionally-malformed source and tree data; ruff
+# would (correctly) refuse to parse them.
+extend-exclude = ["tests/fixtures"]
 
 [tool.ruff.lint]
 # E/F : pycodestyle + pyflakes (baseline)

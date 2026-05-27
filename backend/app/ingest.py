@@ -8,6 +8,7 @@ threshold.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import subprocess
@@ -19,6 +20,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import File, Repo
+
+log = logging.getLogger(__name__)
 
 # --- URL parsing ----------------------------------------------------------
 
@@ -217,7 +220,16 @@ class FileCountExceededError(Exception):
 
 
 async def ingest_repo(url: str, session: AsyncSession) -> Repo:
-    """Full ingestion pipeline: parse → clone → walk → upsert. Returns the Repo row."""
+    """Full ingestion pipeline: parse → clone → walk → upsert → chunk.
+
+    Chunking is invoked after the file commit while the tempdir still exists
+    (the chunker reads source files off disk this slice; see ADR 0008).
+    Chunking failures are logged and swallowed — the ingest is preserved and
+    chunks can be retried via POST /repos/{repo_id}/chunk.
+    """
+    # Lazy import to avoid an import cycle (app.api imports from app.ingest).
+    from app.chunking.orchestrator import chunk_repo
+
     owner, name = parse_github_url(url)
     clone_url = f"https://github.com/{owner}/{name}.git"
 
@@ -226,20 +238,30 @@ async def ingest_repo(url: str, session: AsyncSession) -> Repo:
         default_branch = await asyncio.to_thread(clone_repo, clone_url, dest)
         files = await asyncio.to_thread(walk_repo, dest)
 
-    # Check ceiling BEFORE we touch the DB so a too-large repo causes no churn.
-    if len(files) > MAX_FILE_COUNT:
-        raise FileCountExceededError(len(files))
+        # Check ceiling BEFORE we touch the DB so a too-large repo causes no churn.
+        if len(files) > MAX_FILE_COUNT:
+            raise FileCountExceededError(len(files))
 
-    # Upsert by delete-then-insert; FK cascade clears existing files.
-    # Both DML operations live in the same transaction; an INSERT failure
-    # rolls back the DELETE.
-    existing = await session.scalar(select(Repo).where(Repo.owner == owner, Repo.name == name))
-    if existing is not None:
-        await session.delete(existing)
-        await session.flush()
+        # Upsert by delete-then-insert; FK cascade clears existing files.
+        # Both DML operations live in the same transaction; an INSERT failure
+        # rolls back the DELETE.
+        existing = await session.scalar(select(Repo).where(Repo.owner == owner, Repo.name == name))
+        if existing is not None:
+            await session.delete(existing)
+            await session.flush()
 
-    repo = Repo(owner=owner, name=name, default_branch=default_branch)
-    repo.files = [File(path=f.path, size_bytes=f.size_bytes, language=f.language) for f in files]
-    session.add(repo)
-    await session.commit()
+        repo = Repo(owner=owner, name=name, default_branch=default_branch)
+        repo.files = [
+            File(path=f.path, size_bytes=f.size_bytes, language=f.language) for f in files
+        ]
+        session.add(repo)
+        await session.commit()
+
+        # Chunk while the cloned tree is still on disk. Failures here don't
+        # fail the ingest — the repo + files are already persisted.
+        try:
+            await chunk_repo(repo, dest, session)
+        except Exception as exc:
+            log.warning("chunking failed for %s/%s: %s", owner, name, exc)
+
     return repo
