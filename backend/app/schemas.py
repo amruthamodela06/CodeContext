@@ -96,3 +96,45 @@ class ChunkTriggerResponse(BaseModel):
 
     repo_id: int
     chunk_count: int
+
+
+# --- Embeddings + search (Slice 3) --------------------------------------
+
+
+class EmbedTriggerResponse(BaseModel):
+    """Returned by POST /repos/{repo_id}/embed (202 — work runs in background)."""
+
+    repo_id: int
+    embedding_status: str
+
+
+class EmbeddingStatusResponse(BaseModel):
+    repo_id: int
+    embedding_status: str  # pending | in_progress | done | failed
+    embedding_progress: float  # 0.0 - 1.0
+    chunks_total: int
+    chunks_embedded: int
+
+
+class SearchRequest(BaseModel):
+    repo_id: int
+    query: str = Field(..., min_length=1)
+    top_k: int = Field(default=5, ge=1, le=50)
+
+
+class SearchResult(BaseModel):
+    chunk_id: int
+    similarity: float
+    file_path: str
+    chunk_type: str
+    name: str | None
+    start_line: int
+    end_line: int
+    language: str
+    content: str
+
+
+class SearchResponse(BaseModel):
+    repo_id: int
+    query: str
+    results: list[SearchResult]

@@ -5,24 +5,32 @@ import tempfile
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+import app.db as app_db
 from app.chunking.orchestrator import chunk_repo
 from app.db import get_session
+from app.embeddings import get_embedder
+from app.embeddings.orchestrator import embed_repo
 from app.ingest import MAX_FILE_COUNT, FileCountExceededError, clone_repo, ingest_repo
-from app.models import CodeChunk, Repo
+from app.models import ChunkEmbedding, CodeChunk, File, Repo
 from app.schemas import (
     ChunkOut,
     ChunkSummary,
     ChunkTriggerResponse,
+    EmbeddingStatusResponse,
+    EmbedTriggerResponse,
     FileOut,
     IngestRequest,
     RepoChunksResponse,
     RepoFilesResponse,
     RepoOut,
+    SearchRequest,
+    SearchResponse,
+    SearchResult,
 )
 
 log = logging.getLogger(__name__)
@@ -207,3 +215,95 @@ async def get_chunk(chunk_id: int, session: SessionDep) -> ChunkOut:
     if chunk is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"chunk id={chunk_id} not found")
     return ChunkOut.model_validate(chunk)
+
+
+# --- Embeddings + search (Slice 3) ----------------------------------------
+
+
+@router.post(
+    "/repos/{repo_id}/embed",
+    response_model=EmbedTriggerResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    description=(
+        "Embed all of a repo's chunks (CPU, bge-small). Runs in the background; "
+        "returns 202 immediately. Poll GET /repos/{repo_id}/embedding-status. "
+        "Idempotent — existing vectors for the repo are replaced."
+    ),
+)
+async def trigger_embed(
+    repo_id: int,
+    session: SessionDep,
+    background_tasks: BackgroundTasks,
+) -> EmbedTriggerResponse:
+    repo = await session.get(Repo, repo_id)
+    if repo is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"repo id={repo_id} not found")
+
+    # Mark in_progress synchronously so an immediate status poll reflects it.
+    repo.embedding_status = "in_progress"
+    repo.embedding_progress = 0.0
+    await session.commit()
+
+    # app_db.SessionLocal resolved at call time so the test-swapped factory wins.
+    background_tasks.add_task(embed_repo, repo_id, app_db.SessionLocal)
+    return EmbedTriggerResponse(repo_id=repo_id, embedding_status="in_progress")
+
+
+@router.get("/repos/{repo_id}/embedding-status", response_model=EmbeddingStatusResponse)
+async def embedding_status(repo_id: int, session: SessionDep) -> EmbeddingStatusResponse:
+    repo = await session.get(Repo, repo_id)
+    if repo is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"repo id={repo_id} not found")
+
+    chunks_total = await session.scalar(
+        select(func.count(CodeChunk.id)).where(CodeChunk.repo_id == repo_id)
+    )
+    chunks_embedded = await session.scalar(
+        select(func.count(ChunkEmbedding.id)).where(ChunkEmbedding.repo_id == repo_id)
+    )
+    return EmbeddingStatusResponse(
+        repo_id=repo_id,
+        embedding_status=repo.embedding_status,
+        embedding_progress=repo.embedding_progress,
+        chunks_total=chunks_total or 0,
+        chunks_embedded=chunks_embedded or 0,
+    )
+
+
+@router.post("/search", response_model=SearchResponse)
+async def search(req: SearchRequest, session: SessionDep) -> SearchResponse:
+    repo = await session.get(Repo, req.repo_id)
+    if repo is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"repo id={req.repo_id} not found")
+
+    embedder = get_embedder()
+    query_vec = await asyncio.to_thread(embedder.embed_one, req.query)
+
+    # pgvector cosine distance (<=>). similarity = 1 - distance.
+    distance = ChunkEmbedding.embedding.cosine_distance(query_vec).label("distance")
+    rows = (
+        await session.execute(
+            select(CodeChunk, File.path, distance)
+            .join(ChunkEmbedding, ChunkEmbedding.chunk_id == CodeChunk.id)
+            .join(File, File.id == CodeChunk.file_id)
+            .where(ChunkEmbedding.repo_id == req.repo_id)
+            .order_by(distance)
+            .limit(req.top_k)
+        )
+    ).all()
+
+    results = [
+        SearchResult(
+            chunk_id=chunk.id,
+            similarity=1.0 - float(dist),
+            file_path=path,
+            chunk_type=chunk.chunk_type,
+            name=chunk.name,
+            start_line=chunk.start_line,
+            end_line=chunk.end_line,
+            language=chunk.language,
+            content=chunk.content,
+        )
+        for chunk, path, dist in rows
+    ]
+    return SearchResponse(repo_id=req.repo_id, query=req.query, results=results)

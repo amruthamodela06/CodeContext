@@ -9,6 +9,8 @@ import {
   type RepoFilesResponse,
 } from "@/lib/api";
 
+import { EmbedAndSearch } from "./EmbedAndSearch";
+
 export function IngestForm() {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
@@ -87,6 +89,9 @@ export function IngestForm() {
       {result && <ResultTable result={result} />}
       {chunkSummary && chunkSummary.total > 0 && (
         <ChunkSummaryPanel data={chunkSummary} />
+      )}
+      {result && (
+        <EmbedAndSearch key={result.repo.id} repoId={result.repo.id} />
       )}
     </div>
   );

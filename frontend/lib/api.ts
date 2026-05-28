@@ -83,3 +83,61 @@ export async function fetchChunks(
   );
   return unwrap<RepoChunksResponse>(res);
 }
+
+// --- Embeddings + search (Slice 3) ---
+
+export type EmbedTrigger = {
+  repo_id: number;
+  embedding_status: string;
+};
+
+export type EmbeddingStatus = {
+  repo_id: number;
+  embedding_status: "pending" | "in_progress" | "done" | "failed";
+  embedding_progress: number;
+  chunks_total: number;
+  chunks_embedded: number;
+};
+
+export type SearchResultItem = {
+  chunk_id: number;
+  similarity: number;
+  file_path: string;
+  chunk_type: string;
+  name: string | null;
+  start_line: number;
+  end_line: number;
+  language: string;
+  content: string;
+};
+
+export type SearchResponse = {
+  repo_id: number;
+  query: string;
+  results: SearchResultItem[];
+};
+
+export async function triggerEmbed(repoId: number): Promise<EmbedTrigger> {
+  const res = await fetch(`${API_URL}/repos/${repoId}/embed`, { method: "POST" });
+  return unwrap<EmbedTrigger>(res);
+}
+
+export async function fetchEmbeddingStatus(
+  repoId: number,
+): Promise<EmbeddingStatus> {
+  const res = await fetch(`${API_URL}/repos/${repoId}/embedding-status`);
+  return unwrap<EmbeddingStatus>(res);
+}
+
+export async function search(
+  repoId: number,
+  query: string,
+  topK = 5,
+): Promise<SearchResponse> {
+  const res = await fetch(`${API_URL}/search`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo_id: repoId, query, top_k: topK }),
+  });
+  return unwrap<SearchResponse>(res);
+}
