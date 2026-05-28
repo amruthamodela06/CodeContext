@@ -1,9 +1,11 @@
 from datetime import datetime
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     String,
@@ -13,6 +15,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+# Embedding vector dimension. bge-small-en-v1.5 is 384-dim (ADR 0009).
+# Fixed at column-creation time; a model change with a different dimension
+# means a migration + re-embed (startup asserts the active embedder matches).
+EMBEDDING_DIM = 384
 
 
 class Base(DeclarativeBase):
@@ -30,9 +37,17 @@ class Repo(Base):
     ingested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    # Embedding job lifecycle (ADR 0009). pending | in_progress | done | failed.
+    embedding_status: Mapped[str] = mapped_column(
+        String(16), server_default="pending", nullable=False
+    )
+    embedding_progress: Mapped[float] = mapped_column(Float, server_default="0.0", nullable=False)
 
     files: Mapped[list["File"]] = relationship(back_populates="repo", cascade="all, delete-orphan")
     code_chunks: Mapped[list["CodeChunk"]] = relationship(
+        back_populates="repo", cascade="all, delete-orphan"
+    )
+    chunk_embeddings: Mapped[list["ChunkEmbedding"]] = relationship(
         back_populates="repo", cascade="all, delete-orphan"
     )
 
@@ -91,3 +106,37 @@ class CodeChunk(Base):
 
     repo: Mapped[Repo] = relationship(back_populates="code_chunks")
     file: Mapped["File"] = relationship(back_populates="code_chunks")
+    chunk_embeddings: Mapped[list["ChunkEmbedding"]] = relationship(
+        back_populates="chunk", cascade="all, delete-orphan"
+    )
+
+
+class ChunkEmbedding(Base):
+    """A dense vector embedding of a CodeChunk. See ADR 0009.
+
+    Separate table (not a column on code_chunk) so multiple models can coexist
+    for ablation. The vector dimension is fixed at column creation; re-embed
+    deletes the repo's existing rows then re-inserts. The HNSW index is built by
+    the embed orchestrator after bulk insert, NOT in the migration.
+    """
+
+    __tablename__ = "chunk_embedding"
+    __table_args__ = (
+        # Repo-scoped filtering without joining code_chunk.
+        Index("ix_chunk_embedding_repo_model", "repo_id", "model_name"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chunk_id: Mapped[int] = mapped_column(
+        ForeignKey("code_chunk.id", ondelete="CASCADE"), index=True
+    )
+    repo_id: Mapped[int] = mapped_column(ForeignKey("repo.id", ondelete="CASCADE"), index=True)
+    embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM))
+    model_name: Mapped[str] = mapped_column(String(64))
+    dimension: Mapped[int] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    chunk: Mapped[CodeChunk] = relationship(back_populates="chunk_embeddings")
+    repo: Mapped[Repo] = relationship(back_populates="chunk_embeddings")

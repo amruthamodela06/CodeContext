@@ -102,7 +102,7 @@ These are settled. Don't re-litigate without a written ADR.
 - **Python runtime**: `>=3.12` (currently 3.14 via `uv`). Floor pin, not exact; uv lockfile + `.python-version` give reproducibility.
 - **Database**: Postgres + pgvector (single DB for structured + vector data)
 - **Parsing**: tree-sitter for AST extraction
-- **Embeddings**: `bge-base-en-v1.5` via `sentence-transformers` (CPU, in-process) by default. Pluggable via an `Embedder` interface; OpenAI `text-embedding-3-small`, Voyage `voyage-code-2`, and Ollama `nomic-embed-text` are alternative implementations used in ablation. See ADR 0007.
+- **Embeddings**: `bge-small-en-v1.5` (384-dim) via `sentence-transformers` (CPU, in-process) by default. Pluggable via an `Embedder` interface; `bge-base-en-v1.5`, OpenAI `text-embedding-3-small`, Voyage `voyage-code-2`, and Ollama `nomic-embed-text` are alternative implementations used in ablation. See ADR 0007 (provider abstraction) + ADR 0009 (bge-small default + vector storage).
 - **LLM**: Gemini 2.0 Flash (free tier) by default, behind an `LLMProvider` interface. Implementations: `gemini`, `openai` (GPT-4o-mini), `anthropic` (Claude Haiku/Sonnet), `ollama` (Qwen 2.5 Coder 3B). Selected via the `LLM_PROVIDER` env. All providers must support streaming. See ADR 0007.
 - **Retrieval**: Hybrid (BM25 via Postgres FTS + vector via pgvector) with reciprocal rank fusion
 - **Languages supported**: Python, TypeScript/JavaScript, Go, Rust (in that priority order)

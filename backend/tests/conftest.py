@@ -10,6 +10,10 @@ from pathlib import Path
 # DATABASE_URL set in their shell.
 _TEST_DB_URL = "postgresql+asyncpg://codecontext:codecontext@localhost:5433/codecontext_test"
 os.environ["DATABASE_URL"] = _TEST_DB_URL
+# Tests use the deterministic FakeEmbedder (384-dim, no model load). The slow
+# real-model test instantiates SentenceTransformersEmbedder directly and is
+# gated behind RUN_SLOW, so it doesn't depend on this.
+os.environ["EMBEDDING_PROVIDER"] = "mock"
 
 import asyncpg  # noqa: E402
 import pytest  # noqa: E402
@@ -72,6 +76,9 @@ async def _create_tables() -> None:
     engine = create_async_engine(_TEST_DB_URL)
     try:
         async with engine.begin() as conn:
+            # pgvector extension must exist before create_all builds a table
+            # with a vector column. Tests skip Alembic, so we run it here too.
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             await conn.run_sync(Base.metadata.create_all)
     finally:
         await engine.dispose()

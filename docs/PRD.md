@@ -190,7 +190,7 @@ FastAPI was selected because:
 
 **Parsing**: tree-sitter for AST extraction and chunking. Languages supported in v1: Python, TypeScript/JavaScript, Go, Rust (in priority order).
 
-**Embeddings**: `bge-base-en-v1.5` via `sentence-transformers`, running in-process on CPU. Abstracted behind an `Embedder` interface; swappable to OpenAI `text-embedding-3-small`, Voyage `voyage-code-2`, or Ollama `nomic-embed-text` for ablation.
+**Embeddings**: `bge-small-en-v1.5` (384-dim) via `sentence-transformers`, running in-process on CPU — chosen over bge-base for ~2-3× faster CPU embedding at a ~1-3% quality cost (see ADR 0009). Abstracted behind an `Embedder` interface; swappable to `bge-base-en-v1.5`, OpenAI `text-embedding-3-small`, Voyage `voyage-code-2`, or Ollama `nomic-embed-text` for ablation.
 
 **LLM**: Gemini 2.0 Flash via free tier as default. Abstracted behind an `LLMProvider` interface with implementations for `gemini` (default), `openai` (GPT-4o-mini), `anthropic` (Claude Haiku), and `ollama` (local Qwen 2.5 Coder 3B Instruct for offline development and ablation). Provider selected via `LLM_PROVIDER` env variable. All providers must support streaming.
 

@@ -18,6 +18,9 @@ venv/
 # uv
 .uv-cache/
 
+# HuggingFace model cache (project-local mount, used once the backend is containerized — ADR 0009)
+.hf-cache/
+
 # Node / Next.js
 node_modules/
 .next/

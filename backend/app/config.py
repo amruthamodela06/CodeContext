@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     github_token: str = Field(
         default="", description="Optional GitHub PAT for higher API rate limits."
     )
+    # ADR 0009. Carries the full embedder identity: bge-small (default),
+    # bge-base, mock (tests), or a future provider id.
+    embedding_provider: str = Field(default="bge-small")
     backend_host: str = "0.0.0.0"
     backend_port: int = 8000
     frontend_origin: str = "http://localhost:3000"

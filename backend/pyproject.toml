@@ -16,6 +16,9 @@ readme = "README.md"
 #   tree-sitter-language-pack — AST grammars for Python (ADR-0008); stubs for
 #                          TS/JS/Go/Rust ship in the same package. Pre-built
 #                          cp310-abi3 wheels work on Python 3.14.
+#   pgvector             — SQLAlchemy Vector type + asyncpg adapter (ADR-0009)
+#   sentence-transformers — bge-small-en-v1.5 embedder, CPU (ADR-0009). torch
+#                          2.12 has a cp314 win wheel.
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -25,6 +28,8 @@ dependencies = [
     "pydantic-settings>=2.3",
     "alembic>=1.13",
     "tree-sitter-language-pack>=1.8.1",
+    "pgvector>=0.4.2",
+    "sentence-transformers>=5.5.1",
 ]
 
 # Dev dependencies (PEP 735 dependency-groups, the modern uv-recommended form).

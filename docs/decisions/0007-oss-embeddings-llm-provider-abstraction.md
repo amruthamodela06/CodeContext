@@ -1,7 +1,9 @@
 # ADR 0007: Open-source embeddings + provider-abstracted LLM with Gemini default
 
-**Status**: Accepted
+**Status**: Accepted (default embedding *variant* amended by ADR 0009)
 **Date**: 2026-05-26
+
+> **Amendment (2026-05-27, ADR 0009):** this ADR named the embedding default as `bge-base-en-v1.5`. Slice 3 flips the default *variant* to `bge-small-en-v1.5` (384-dim) for ~2-3× faster CPU embedding; bge-base becomes the ablation comparison. The provider abstraction and the `bge` family choice below are unchanged.
 
 ## Context
 
