@@ -9,7 +9,7 @@ This is a portfolio project. **Rigor and quality matter more than feature count.
 ## Status
 
 - **Phase**: v1 development
-- **Current slice**: Slice 1 complete — ingestion + file list, end-to-end through the Next.js UI. Slice 2 TBD (PRD §11 week 2 is AST chunking + hybrid retrieval + citations).
+- **Current slice**: Slice 4 complete — LLM answers with mechanically-verified citations, streamed end-to-end (`POST /query` SSE; `LLMProvider` abstraction with Gemini default + Ollama offline; `[chunk:cN]` parse/validate/resolve; commit-SHA-pinned permalinks). Slices 1–3 (ingest, AST chunking, embeddings + vector search) done. Slice 5 next = hybrid retrieval (BM25 + vector, RRF) + reranker. See ADR 0010.
 - **Flagship eval repo**: FastAPI (`tiangolo/fastapi`)
 
 ---

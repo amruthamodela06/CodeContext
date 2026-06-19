@@ -15,6 +15,8 @@ import {
   type SearchResultItem,
 } from "@/lib/api";
 
+import { QueryPanel } from "./QueryPanel";
+
 export function EmbedAndSearch({ repoId }: { repoId: number }) {
   const [status, setStatus] = useState<EmbeddingStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -92,7 +94,19 @@ export function EmbedAndSearch({ repoId }: { repoId: number }) {
         />
       )}
 
-      {st === "done" && <SearchPanel repoId={repoId} />}
+      {st === "done" && (
+        <div className="space-y-6">
+          <QueryPanel repoId={repoId} />
+          <details className="rounded border border-gray-200 p-3">
+            <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-gray-500">
+              Semantic search (raw chunks)
+            </summary>
+            <div className="mt-3">
+              <SearchPanel repoId={repoId} />
+            </div>
+          </details>
+        </div>
+      )}
     </section>
   );
 }

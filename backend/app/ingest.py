@@ -188,8 +188,14 @@ def walk_repo(root: Path) -> list[FileMeta]:
 # --- Git clone ------------------------------------------------------------
 
 
-def clone_repo(clone_url: str, dest: Path) -> str:
-    """Shallow-clone clone_url into dest. Returns the default branch name.
+@dataclass(frozen=True)
+class CloneResult:
+    default_branch: str
+    commit_sha: str  # full 40-char HEAD SHA, pinned for citation permalinks (§9.4)
+
+
+def clone_repo(clone_url: str, dest: Path) -> CloneResult:
+    """Shallow-clone clone_url into dest. Returns the branch name and HEAD SHA.
 
     Raises subprocess.CalledProcessError if `git` is missing or the clone fails.
     """
@@ -199,13 +205,19 @@ def clone_repo(clone_url: str, dest: Path) -> str:
         capture_output=True,
         text=True,
     )
-    head = subprocess.run(
+    branch = subprocess.run(
         ["git", "-C", str(dest), "rev-parse", "--abbrev-ref", "HEAD"],
         check=True,
         capture_output=True,
         text=True,
     )
-    return head.stdout.strip()
+    sha = subprocess.run(
+        ["git", "-C", str(dest), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return CloneResult(default_branch=branch.stdout.strip(), commit_sha=sha.stdout.strip())
 
 
 # --- Orchestrator ---------------------------------------------------------
@@ -235,7 +247,7 @@ async def ingest_repo(url: str, session: AsyncSession) -> Repo:
 
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         dest = Path(tmp) / "repo"
-        default_branch = await asyncio.to_thread(clone_repo, clone_url, dest)
+        clone = await asyncio.to_thread(clone_repo, clone_url, dest)
         files = await asyncio.to_thread(walk_repo, dest)
 
         # Check ceiling BEFORE we touch the DB so a too-large repo causes no churn.
@@ -250,7 +262,12 @@ async def ingest_repo(url: str, session: AsyncSession) -> Repo:
             await session.delete(existing)
             await session.flush()
 
-        repo = Repo(owner=owner, name=name, default_branch=default_branch)
+        repo = Repo(
+            owner=owner,
+            name=name,
+            default_branch=clone.default_branch,
+            commit_sha=clone.commit_sha,
+        )
         repo.files = [
             File(path=f.path, size_bytes=f.size_bytes, language=f.language) for f in files
         ]

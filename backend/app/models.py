@@ -34,6 +34,10 @@ class Repo(Base):
     owner: Mapped[str] = mapped_column(String(64), index=True)
     name: Mapped[str] = mapped_column(String(128), index=True)
     default_branch: Mapped[str] = mapped_column(String(128))
+    # HEAD commit at ingestion time. Nullable so repos ingested before Slice 4
+    # (no SHA captured) still load; citation permalinks fall back to the branch
+    # ref when null. See ADR 0010 / PRD §9.4.
+    commit_sha: Mapped[str | None] = mapped_column(String(40))
     ingested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

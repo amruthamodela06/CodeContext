@@ -1,9 +1,11 @@
 # ADR 0007: Open-source embeddings + provider-abstracted LLM with Gemini default
 
-**Status**: Accepted (default embedding *variant* amended by ADR 0009)
+**Status**: Accepted (default embedding *variant* amended by ADR 0009; `LLMProvider` realized in Slice 4 — see ADR 0010)
 **Date**: 2026-05-26
 
 > **Amendment (2026-05-27, ADR 0009):** this ADR named the embedding default as `bge-base-en-v1.5`. Slice 3 flips the default *variant* to `bge-small-en-v1.5` (384-dim) for ~2-3× faster CPU embedding; bge-base becomes the ablation comparison. The provider abstraction and the `bge` family choice below are unchanged.
+
+> **Amendment (2026-05-30, Slice 4):** the `LLMProvider` interface is now concrete. Shape: `Message(role, content)` + `GenResult(text, prompt_tokens, completion_tokens)`; `async generate(...) -> GenResult` and `generate_stream(...) -> AsyncIterator[str]`; a `@cache`'d `get_llm_provider()` factory keyed on `LLM_PROVIDER` (mirrors `get_embedder`). **All providers share one transport** — the official `openai` SDK (`AsyncOpenAI`) pointed at each backend's OpenAI-compatible endpoint — rather than per-provider HTTP clients (Gemini and Ollama both speak that protocol; this collapses the "OpenAI-compatible SDK pattern" above into a single client). Slice 4 implements `gemini` (default) and `ollama` (offline); `openai`/`anthropic` are interface-complete stubs that raise `NotImplementedError` (ablation slice); `mock` is a deterministic in-process provider for tests. A per-process RPM limiter guards the Gemini free tier. Citation generation/validation built on this interface is specified in **ADR 0010**.
 
 ## Context
 
