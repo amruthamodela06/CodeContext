@@ -19,6 +19,10 @@ readme = "README.md"
 #   pgvector             — SQLAlchemy Vector type + asyncpg adapter (ADR-0009)
 #   sentence-transformers — bge-small-en-v1.5 embedder, CPU (ADR-0009). torch
 #                          2.12 has a cp314 win wheel.
+#   openai               — uniform transport for the OpenAI-compatible endpoints
+#                          of Gemini and Ollama (ADR-0007 + 0010); no per-provider
+#                          HTTP clients.
+#   sse-starlette        — Server-Sent Events response for streaming /query tokens.
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -30,6 +34,8 @@ dependencies = [
     "tree-sitter-language-pack>=1.8.1",
     "pgvector>=0.4.2",
     "sentence-transformers>=5.5.1",
+    "openai>=1.40",
+    "sse-starlette>=2.1",
 ]
 
 # Dev dependencies (PEP 735 dependency-groups, the modern uv-recommended form).

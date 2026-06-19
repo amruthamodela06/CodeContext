@@ -3,6 +3,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.citations.context import CitedChunk
+from app.citations.validator import ResolvedCitation
+
 # --- Ingest -------------------------------------------------------------
 
 
@@ -29,6 +32,7 @@ class RepoOut(BaseModel):
     owner: str
     name: str
     default_branch: str
+    commit_sha: str | None = None
     ingested_at: datetime
 
 
@@ -138,3 +142,26 @@ class SearchResponse(BaseModel):
     repo_id: int
     query: str
     results: list[SearchResult]
+
+
+# --- Query / cited answers (Slice 4, ADR 0010) --------------------------
+
+
+class QueryRequest(BaseModel):
+    repo_id: int
+    question: str = Field(..., min_length=1)
+    top_k: int = Field(default=5, ge=1, le=50)
+    stream: bool = True
+
+
+class QueryResponse(BaseModel):
+    """Non-streaming fallback shape (stream=false). The streaming path emits the
+    same data across SSE `sources` / `citations` events instead.
+    """
+
+    repo_id: int
+    question: str
+    answer: str
+    citations: list[ResolvedCitation]
+    warnings: list[str]
+    sources: list[CitedChunk]

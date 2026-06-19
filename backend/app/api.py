@@ -1,7 +1,9 @@
 import asyncio
+import json
 import logging
 import subprocess
 import tempfile
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated
 
@@ -9,13 +11,17 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, s
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sse_starlette.sse import EventSourceResponse
 
 import app.db as app_db
 from app.chunking.orchestrator import chunk_repo
+from app.citations import build_messages, parse, resolve
+from app.citations.context import CitationContext
 from app.db import get_session
 from app.embeddings import get_embedder
 from app.embeddings.orchestrator import embed_repo
 from app.ingest import MAX_FILE_COUNT, FileCountExceededError, clone_repo, ingest_repo
+from app.llm import get_llm_provider
 from app.models import ChunkEmbedding, CodeChunk, File, Repo
 from app.schemas import (
     ChunkOut,
@@ -25,6 +31,8 @@ from app.schemas import (
     EmbedTriggerResponse,
     FileOut,
     IngestRequest,
+    QueryRequest,
+    QueryResponse,
     RepoChunksResponse,
     RepoFilesResponse,
     RepoOut,
@@ -270,14 +278,14 @@ async def embedding_status(repo_id: int, session: SessionDep) -> EmbeddingStatus
     )
 
 
-@router.post("/search", response_model=SearchResponse)
-async def search(req: SearchRequest, session: SessionDep) -> SearchResponse:
-    repo = await session.get(Repo, req.repo_id)
-    if repo is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"repo id={req.repo_id} not found")
-
+async def retrieve_chunks(
+    session: AsyncSession, repo_id: int, query: str, top_k: int
+) -> list[SearchResult]:
+    """Embed `query` and return the top-k chunks for the repo by cosine
+    similarity. Shared by /search and /query so both rank identically.
+    """
     embedder = get_embedder()
-    query_vec = await asyncio.to_thread(embedder.embed_one, req.query)
+    query_vec = await asyncio.to_thread(embedder.embed_one, query)
 
     # pgvector cosine distance (<=>). similarity = 1 - distance.
     distance = ChunkEmbedding.embedding.cosine_distance(query_vec).label("distance")
@@ -286,13 +294,12 @@ async def search(req: SearchRequest, session: SessionDep) -> SearchResponse:
             select(CodeChunk, File.path, distance)
             .join(ChunkEmbedding, ChunkEmbedding.chunk_id == CodeChunk.id)
             .join(File, File.id == CodeChunk.file_id)
-            .where(ChunkEmbedding.repo_id == req.repo_id)
+            .where(ChunkEmbedding.repo_id == repo_id)
             .order_by(distance)
-            .limit(req.top_k)
+            .limit(top_k)
         )
     ).all()
-
-    results = [
+    return [
         SearchResult(
             chunk_id=chunk.id,
             similarity=1.0 - float(dist),
@@ -306,4 +313,85 @@ async def search(req: SearchRequest, session: SessionDep) -> SearchResponse:
         )
         for chunk, path, dist in rows
     ]
+
+
+@router.post("/search", response_model=SearchResponse)
+async def search(req: SearchRequest, session: SessionDep) -> SearchResponse:
+    repo = await session.get(Repo, req.repo_id)
+    if repo is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"repo id={req.repo_id} not found")
+
+    results = await retrieve_chunks(session, req.repo_id, req.query, req.top_k)
     return SearchResponse(repo_id=req.repo_id, query=req.query, results=results)
+
+
+def _sse(event: str, payload: dict) -> dict:
+    return {"event": event, "data": json.dumps(payload)}
+
+
+@router.post(
+    "/query",
+    description=(
+        "Ask a question about the repo. Retrieves top-k chunks, streams a cited "
+        "answer from the configured LLM (SSE), then emits resolved citations. "
+        "Citation ids (`[chunk:c1]`) are validated mechanically against the "
+        "retrieved set — see ADR 0010."
+    ),
+)
+async def query(req: QueryRequest, session: SessionDep):
+    repo = await session.get(Repo, req.repo_id)
+    if repo is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"repo id={req.repo_id} not found")
+
+    # All DB access happens here, before streaming begins; the SSE generator
+    # below is pure in-memory work (LLM stream + citation parsing), so it never
+    # touches the request-scoped session after the response starts.
+    results = await retrieve_chunks(session, req.repo_id, req.question, req.top_k)
+    ctx = CitationContext.from_results(results)
+    messages = build_messages(repo.owner, repo.name, req.question, ctx)
+    provider = get_llm_provider()
+    owner, name = repo.owner, repo.name
+    ref = repo.commit_sha or repo.default_branch  # SHA-pinned when available (§9.4)
+
+    if not req.stream:
+        gen = await provider.generate(messages)
+        cites, warnings = parse(gen.text)
+        resolved = resolve(cites, ctx, owner=owner, name=name, ref=ref)
+        return QueryResponse(
+            repo_id=req.repo_id,
+            question=req.question,
+            answer=gen.text,
+            citations=resolved,
+            warnings=warnings,
+            sources=ctx.chunks,
+        )
+
+    async def event_gen() -> AsyncIterator[dict]:
+        # All retrieved chunks up front: powers the Sources panel and supplies
+        # the chunk bodies the UI shows when a citation is expanded.
+        yield _sse("sources", {"sources": [c.model_dump() for c in ctx.chunks]})
+
+        parts: list[str] = []
+        try:
+            async for delta in provider.generate_stream(messages):
+                parts.append(delta)
+                yield _sse("token", {"text": delta})
+        except Exception as exc:
+            # Surface any LLM failure to the client as an error event.
+            # CancelledError is BaseException, not Exception, so a client
+            # disconnect propagates past this handler and the provider's
+            # `finally` closes the upstream stream (ADR 0010).
+            log.warning("LLM stream failed: %s", exc)
+            yield _sse("error", {"message": str(exc), "stage": "llm"})
+            return
+
+        answer = "".join(parts)
+        cites, warnings = parse(answer)
+        resolved = resolve(cites, ctx, owner=owner, name=name, ref=ref)
+        yield _sse(
+            "citations",
+            {"citations": [r.model_dump() for r in resolved], "warnings": warnings},
+        )
+        yield _sse("done", {})
+
+    return EventSourceResponse(event_gen(), headers={"X-Accel-Buffering": "no"})

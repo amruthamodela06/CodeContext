@@ -14,6 +14,9 @@ os.environ["DATABASE_URL"] = _TEST_DB_URL
 # real-model test instantiates SentenceTransformersEmbedder directly and is
 # gated behind RUN_SLOW, so it doesn't depend on this.
 os.environ["EMBEDDING_PROVIDER"] = "mock"
+# Deterministic in-process LLM (MockLLMProvider) — no API key, no network. Its
+# canned answer cites c1 (valid), c99 (invalid), and [chunk:none].
+os.environ["LLM_PROVIDER"] = "mock"
 
 import asyncpg  # noqa: E402
 import pytest  # noqa: E402

@@ -4,12 +4,44 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 import {
   fetchChunks,
+  fetchRepoFiles,
   ingestRepo,
   type RepoChunksResponse,
   type RepoFilesResponse,
 } from "@/lib/api";
 
 import { EmbedAndSearch } from "./EmbedAndSearch";
+
+// Last-ingested repo persisted to localStorage so a page refresh doesn't wipe
+// the EmbedAndSearch state and force a re-ingest + re-embed during iteration.
+// We store only the {owner, name} key — files/chunks live in the DB and are
+// refetched via GET /repos/{owner}/{name}/files on mount.
+const STORAGE_KEY = "codecontext.last-repo";
+
+type SavedRepo = { owner: string; name: string };
+
+// Matches the backend's GitHub URL regex (app/ingest.py:_GITHUB_URL) so the
+// frontend can pre-parse owner/name without a backend round-trip.
+const GITHUB_URL = /^https:\/\/github\.com\/([A-Za-z0-9](?:[A-Za-z0-9-]{0,38})?)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/;
+
+function parseGithubUrl(u: string): { owner: string; name: string } | null {
+  const m = u.trim().match(GITHUB_URL);
+  return m ? { owner: m[1], name: m[2] } : null;
+}
+
+// Try load-by-URL first (no re-clone, no embedding wipe). Fall back to fresh
+// ingest on 404 or unparseable URL — at which point the backend re-validates.
+async function loadOrIngest(url: string): Promise<RepoFilesResponse> {
+  const parsed = parseGithubUrl(url);
+  if (parsed) {
+    try {
+      return await fetchRepoFiles(parsed.owner, parsed.name);
+    } catch {
+      // not ingested yet; fall through
+    }
+  }
+  return ingestRepo(url);
+}
 
 export function IngestForm() {
   const [url, setUrl] = useState("");
@@ -20,6 +52,31 @@ export function IngestForm() {
     null,
   );
 
+  // Restore the previously-ingested repo on mount. A 404 (repo was deleted /
+  // DB reset) silently clears the saved key.
+  useEffect(() => {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    let saved: SavedRepo;
+    try {
+      saved = JSON.parse(raw) as SavedRepo;
+    } catch {
+      localStorage.removeItem(STORAGE_KEY);
+      return;
+    }
+    let cancelled = false;
+    fetchRepoFiles(saved.owner, saved.name)
+      .then((data) => {
+        if (!cancelled) setResult(data);
+      })
+      .catch(() => {
+        localStorage.removeItem(STORAGE_KEY);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const handleSubmit = useCallback(
     async (e: FormEvent) => {
       e.preventDefault();
@@ -27,8 +84,12 @@ export function IngestForm() {
       setError(null);
       setChunkSummary(null);
       try {
-        const data = await ingestRepo(url);
+        const data = await loadOrIngest(url);
         setResult(data);
+        localStorage.setItem(
+          STORAGE_KEY,
+          JSON.stringify({ owner: data.repo.owner, name: data.repo.name }),
+        );
       } catch (err) {
         setError(err instanceof Error ? err.message : "Unknown error");
         setResult(null);
@@ -38,6 +99,13 @@ export function IngestForm() {
     },
     [url],
   );
+
+  const onClear = useCallback(() => {
+    localStorage.removeItem(STORAGE_KEY);
+    setResult(null);
+    setChunkSummary(null);
+    setError(null);
+  }, []);
 
   // After an ingest, pull the chunk summary in a second request. (The /ingest
   // response stays additive-only — chunks aren't embedded in it.) Limit=0
@@ -86,7 +154,7 @@ export function IngestForm() {
         </div>
       )}
 
-      {result && <ResultTable result={result} />}
+      {result && <ResultTable result={result} onClear={onClear} />}
       {chunkSummary && chunkSummary.total > 0 && (
         <ChunkSummaryPanel data={chunkSummary} />
       )}
@@ -97,17 +165,33 @@ export function IngestForm() {
   );
 }
 
-function ResultTable({ result }: { result: RepoFilesResponse }) {
+function ResultTable({
+  result,
+  onClear,
+}: {
+  result: RepoFilesResponse;
+  onClear: () => void;
+}) {
   return (
     <section className="space-y-3">
       <header className="flex items-baseline justify-between">
         <h2 className="text-lg font-medium">
           {result.repo.owner}/{result.repo.name}
         </h2>
-        <span className="text-xs text-gray-500">
-          {result.file_count} file{result.file_count === 1 ? "" : "s"} · branch{" "}
-          <span className="font-mono">{result.repo.default_branch}</span>
-        </span>
+        <div className="flex items-baseline gap-3">
+          <span className="text-xs text-gray-500">
+            {result.file_count} file{result.file_count === 1 ? "" : "s"} · branch{" "}
+            <span className="font-mono">{result.repo.default_branch}</span>
+          </span>
+          <button
+            type="button"
+            onClick={onClear}
+            title="Forget this repo (UI only — DB rows are kept)"
+            className="text-xs text-gray-400 hover:text-gray-700"
+          >
+            × clear
+          </button>
+        </div>
       </header>
       <div className="overflow-hidden rounded border border-gray-200">
         <table className="min-w-full text-sm">

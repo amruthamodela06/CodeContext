@@ -23,18 +23,26 @@ from app.models import File, Repo
 pytestmark = pytest.mark.usefixtures("_clean_db")
 
 
-def _fake_clone_factory(sample_repo: Path) -> Callable[[str, Path], str]:
+def _fake_clone_factory(sample_repo: Path) -> Callable[[str, Path], ingest.CloneResult]:
     """Build a stand-in for ingest.clone_repo that uses the local fixture."""
 
-    def fake_clone(clone_url: str, dest: Path) -> str:
+    def fake_clone(clone_url: str, dest: Path) -> ingest.CloneResult:
         shutil.copytree(sample_repo, dest)
-        head = subprocess.run(
+        branch = subprocess.run(
             ["git", "-C", str(dest), "rev-parse", "--abbrev-ref", "HEAD"],
             check=True,
             capture_output=True,
             text=True,
         )
-        return head.stdout.strip()
+        sha = subprocess.run(
+            ["git", "-C", str(dest), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return ingest.CloneResult(
+            default_branch=branch.stdout.strip(), commit_sha=sha.stdout.strip()
+        )
 
     return fake_clone
 

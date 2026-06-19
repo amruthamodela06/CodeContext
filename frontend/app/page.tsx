@@ -8,7 +8,7 @@ export default function Home() {
           CodeContext
         </h1>
         <p className="mt-2 text-sm text-gray-600">
-          Ingest a public GitHub repo and browse its files. (Slice 1 — no Q&amp;A yet.)
+          Ingest a public GitHub repo, embed its code, and ask cited questions.
         </p>
       </header>
       <div className="mt-8">

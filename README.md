@@ -6,19 +6,19 @@ This is a v1 portfolio project under active development. See [docs/PRD.md](docs/
 
 ## Status
 
-The retrieval foundation is built end-to-end; the LLM answer layer is next.
+Naive RAG is end-to-end: ingest → chunk → embed → retrieve → **cited, streaming LLM answer**. Retrieval-quality work (hybrid + rerank) is next.
 
 | Slice | What it added | State |
 |---|---|---|
 | 1 | Repo ingestion + file list | ✅ done |
 | 2 | AST chunking (tree-sitter, Python) | ✅ done |
 | 3 | Embeddings + naive vector search | ✅ done |
-| 4 | Hybrid retrieval (BM25 + vector, RRF) + reranker | ⏳ next |
-| 5 | LLM answer generation with verified citations | ⏳ planned |
+| 4 | LLM answers with mechanically-verified citations (streaming) | ✅ done |
+| 5 | Hybrid retrieval (BM25 + vector, RRF) + reranker | ⏳ next |
 
-**What works today**: paste a public GitHub URL → it shallow-clones, walks + filters files, AST-chunks the Python ones, embeds each chunk locally on CPU (`bge-small-en-v1.5`), stores vectors in pgvector, and answers semantic searches over them. No LLM-generated answers yet — search returns the matching chunks, ranked by cosine similarity.
+**What works today**: paste a public GitHub URL → it shallow-clones, walks + filters files, AST-chunks the Python ones, embeds each chunk locally on CPU (`bge-small-en-v1.5`), stores vectors in pgvector, then **answers natural-language questions with a streaming LLM response grounded in the retrieved code**. Every factual claim carries a `[chunk:cN]` citation that's mechanically verified against the retrieved set and resolved to a commit-SHA-pinned GitHub permalink; a Sources panel shows everything that was retrieved. Raw semantic search is still available too.
 
-Demonstrated on `tiangolo/asyncer`: 100 files → 132 chunks → searching *"run an async function from synchronous code"* surfaces `syncify` and `runnify` by meaning.
+Demonstrated on `tiangolo/asyncer`: 100 files → 132 chunks → asking *"how do I run an async function from synchronous code?"* returns a cited answer pointing at `syncify` / `runnify`, each citation clickable to the exact lines on GitHub.
 
 ## Quick start
 
@@ -32,6 +32,8 @@ make db-up && make db-migrate
 cd backend && uv sync       # creates the backend venv (Python 3.12+ via uv)
 cd ../frontend && pnpm install
 ```
+
+> **LLM key for answers**: `/query` uses Gemini 2.0 Flash by default — add a free `GEMINI_API_KEY` (from [Google AI Studio](https://aistudio.google.com/)) to `.env`. To run fully offline instead, set `LLM_PROVIDER=ollama`, then `ollama pull qwen2.5-coder:3b-instruct`. Ingestion, chunking, embeddings, and search need no LLM key. Gemini's free tier is rate-limited (~15 req/min, guarded by `GEMINI_RPM_LIMIT`).
 
 Day-to-day (three terminals — `make dev` is intentionally not wired yet, see [Makefile](Makefile)):
 
@@ -72,7 +74,10 @@ cd backend && RUN_SLOW=1 uv run pytest -k bge_small   # downloads + runs the rea
 | `POST /repos/{repo_id}/embed` | Embed all chunks (background job; 202) |
 | `GET /repos/{repo_id}/embedding-status` | Poll embedding progress |
 | `POST /search` | Naive cosine search → top-k chunks with similarity |
+| `POST /query` | Ask a question → SSE stream of answer tokens + verified citations |
 | `GET /healthz` | Liveness |
+
+`POST /query` streams Server-Sent Events: `sources` (all retrieved chunks) → `token`×N (answer deltas) → `citations` (resolved + warnings) → `done`, or `error` on mid-stream failure. The browser consumes it with `fetch` + `ReadableStream` (it's a POST, so not `EventSource`).
 
 ## Architecture
 
@@ -81,7 +86,9 @@ cd backend && RUN_SLOW=1 uv run pytest -k bge_small   # downloads + runs the rea
 - **Parsing**: tree-sitter (`tree-sitter-language-pack`) — Python implemented; TS/JS/Go/Rust stubbed
 - **Embeddings**: `bge-small-en-v1.5` (384-dim) via `sentence-transformers`, CPU, in-process; behind a swappable `Embedder` interface (`EMBEDDING_PROVIDER` env)
 - **Vector index**: pgvector HNSW (cosine), built after bulk insert
-- **Frontend**: Next.js 16 (App Router), React 19, TypeScript strict, Tailwind 4
+- **LLM**: Gemini 2.0 Flash (free tier) by default / Ollama Qwen 2.5 Coder 3B offline, behind a swappable `LLMProvider` interface (`LLM_PROVIDER` env); one OpenAI-SDK transport for both (ADR 0007)
+- **Citations**: per-query `[chunk:cN]` IDs, parsed (code-fence-aware, shape-only) and validated against the retrieved set, resolved to commit-SHA-pinned permalinks (ADR 0010)
+- **Frontend**: Next.js 16 (App Router), React 19, TypeScript strict, Tailwind 4; Monaco for cited-chunk rendering
 - **Eval**: pytest-based harness in `eval/` (later slice)
 
 All ML runs on CPU — no GPU assumed (see [ADR 0007](docs/decisions/0007-oss-embeddings-llm-provider-abstraction.md)). The default path uses free/local providers; paid APIs are for ablation only.
@@ -92,7 +99,7 @@ All ML runs on CPU — no GPU assumed (see [ADR 0007](docs/decisions/0007-oss-em
 backend/    FastAPI app, SQLAlchemy models, Alembic migrations, pytest suite
 frontend/   Next.js App Router UI
 infra/      docker-compose (Postgres + pgvector)
-docs/       PRD, roadmap, and decisions/ (ADRs 0001–0009)
+docs/       PRD, roadmap, and decisions/ (ADRs 0001–0010)
 eval/       evaluation harness (later slice)
 ```
 

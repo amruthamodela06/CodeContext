@@ -13,6 +13,7 @@ export type RepoOut = {
   owner: string;
   name: string;
   default_branch: string;
+  commit_sha: string | null;
   ingested_at: string;
 };
 
@@ -67,6 +68,16 @@ export async function ingestRepo(url: string): Promise<RepoFilesResponse> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ url }),
   });
+  return unwrap<RepoFilesResponse>(res);
+}
+
+// Load an already-ingested repo without re-cloning. Used by the
+// localStorage-restore path so iterating doesn't wipe + re-embed each refresh.
+export async function fetchRepoFiles(
+  owner: string,
+  name: string,
+): Promise<RepoFilesResponse> {
+  const res = await fetch(`${API_URL}/repos/${owner}/${name}/files`);
   return unwrap<RepoFilesResponse>(res);
 }
 
@@ -140,4 +151,113 @@ export async function search(
     body: JSON.stringify({ repo_id: repoId, query, top_k: topK }),
   });
   return unwrap<SearchResponse>(res);
+}
+
+// --- Cited Q&A / streaming query (Slice 4, ADR 0010) ---
+
+export type CitedChunkItem = {
+  display_id: string;
+  chunk_id: number;
+  file_path: string;
+  start_line: number;
+  end_line: number;
+  language: string | null;
+  chunk_type: string;
+  name: string | null;
+  content: string;
+  similarity: number;
+};
+
+export type CitationStatus = "valid" | "none" | "invalid";
+
+export type ResolvedCitation = {
+  display_id: string;
+  status: CitationStatus;
+  chunk_id: number | null;
+  file_path: string | null;
+  start_line: number | null;
+  end_line: number | null;
+  permalink: string | null;
+};
+
+export type QueryStreamHandlers = {
+  onSources?: (sources: CitedChunkItem[]) => void;
+  onToken?: (text: string) => void;
+  onCitations?: (citations: ResolvedCitation[], warnings: string[]) => void;
+  onError?: (message: string, stage: string) => void;
+  onDone?: () => void;
+  signal?: AbortSignal;
+};
+
+const SSE_FRAME_SEP = /\r?\n\r?\n/;
+
+function dispatchSseFrame(frame: string, handlers: QueryStreamHandlers): void {
+  let event = "message";
+  const dataLines: string[] = [];
+  for (const line of frame.split(/\r?\n/)) {
+    if (line.startsWith(":")) continue; // comment / keep-alive ping
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+  }
+  if (dataLines.length === 0) return;
+  const raw = JSON.parse(dataLines.join("\n")) as Record<string, unknown>;
+  switch (event) {
+    case "sources":
+      handlers.onSources?.(raw.sources as CitedChunkItem[]);
+      break;
+    case "token":
+      handlers.onToken?.(raw.text as string);
+      break;
+    case "citations":
+      handlers.onCitations?.(
+        raw.citations as ResolvedCitation[],
+        (raw.warnings as string[]) ?? [],
+      );
+      break;
+    case "error":
+      handlers.onError?.(raw.message as string, raw.stage as string);
+      break;
+    case "done":
+      handlers.onDone?.();
+      break;
+  }
+}
+
+// POST + ReadableStream (not EventSource — that's GET-only). Frontend talks to
+// :8000 directly via NEXT_PUBLIC_API_URL, so there's no buffering proxy hop.
+export async function streamQuery(
+  repoId: number,
+  question: string,
+  topK = 5,
+  handlers: QueryStreamHandlers = {},
+): Promise<void> {
+  const res = await fetch(`${API_URL}/query`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo_id: repoId, question, top_k: topK, stream: true }),
+    signal: handlers.signal,
+  });
+  if (!res.ok || !res.body) {
+    const body = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(body.detail ?? `Request failed (${res.status})`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let match: RegExpExecArray | null;
+      while ((match = SSE_FRAME_SEP.exec(buffer)) !== null) {
+        const frame = buffer.slice(0, match.index);
+        buffer = buffer.slice(match.index + match[0].length);
+        dispatchSseFrame(frame, handlers);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
