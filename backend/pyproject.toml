@@ -23,6 +23,9 @@ readme = "README.md"
 #                          of Gemini and Ollama (ADR-0007 + 0010); no per-provider
 #                          HTTP clients.
 #   sse-starlette        — Server-Sent Events response for streaming /query tokens.
+#   httpx                — async HTTP client for GitHub GraphQL ingestion
+#                          (Slice 5b). openai pulls it transitively but we
+#                          declare it directly to pin the surface we use.
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -36,6 +39,7 @@ dependencies = [
     "sentence-transformers>=5.5.1",
     "openai>=1.40",
     "sse-starlette>=2.1",
+    "httpx>=0.27",
 ]
 
 # Dev dependencies (PEP 735 dependency-groups, the modern uv-recommended form).

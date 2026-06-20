@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     ollama_base_url: str = Field(default="http://localhost:11434/v1")
     ollama_model: str = Field(default="qwen2.5-coder:3b-instruct")
 
+    # --- History ingestion (Slice 5b, ADR 0011) ---
+    # How far back to fetch commits / PRs / issues. 12 months matches PRD
+    # §6.5; raise for a backfill ingest, lower for a fast demo.
+    history_ingestion_months: int = Field(default=12, ge=1, le=120)
+
     backend_host: str = "0.0.0.0"
     backend_port: int = 8000
     frontend_origin: str = "http://localhost:3000"

@@ -17,9 +17,11 @@ import app.db as app_db
 from app.chunking.orchestrator import chunk_repo
 from app.citations import build_messages, parse, resolve
 from app.citations.context import CitationContext
+from app.config import get_settings
 from app.db import get_session
 from app.embeddings import get_embedder
 from app.embeddings.orchestrator import embed_repo
+from app.history import ingest_history, select_history_counts
 from app.ingest import MAX_FILE_COUNT, FileCountExceededError, clone_repo, ingest_repo
 from app.llm import get_llm_provider
 from app.models import CodeChunk, EntityEmbedding, File, Repo
@@ -30,6 +32,8 @@ from app.schemas import (
     EmbeddingStatusResponse,
     EmbedTriggerResponse,
     FileOut,
+    HistoryIngestionStatusResponse,
+    HistoryIngestionTriggerResponse,
     IngestRequest,
     QueryRequest,
     QueryResponse,
@@ -278,6 +282,66 @@ async def embedding_status(repo_id: int, session: SessionDep) -> EmbeddingStatus
         embedding_progress=repo.embedding_progress,
         chunks_total=chunks_total or 0,
         chunks_embedded=chunks_embedded or 0,
+    )
+
+
+@router.post(
+    "/repos/{repo_id}/ingest-history",
+    response_model=HistoryIngestionTriggerResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    description=(
+        "Kick off background ingestion of commits / PRs / issues from GitHub "
+        "GraphQL. Resumable: cursor + per-stage counts are persisted in "
+        "repo.history_ingestion_state, so re-running after a rate-limit pause "
+        "or daemon restart picks up from the next page. Requires GITHUB_TOKEN."
+    ),
+)
+async def trigger_history_ingestion(
+    repo_id: int,
+    session: SessionDep,
+    background_tasks: BackgroundTasks,
+) -> HistoryIngestionTriggerResponse:
+    repo = await session.get(Repo, repo_id)
+    if repo is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"repo id={repo_id} not found")
+    if not get_settings().github_token:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "GITHUB_TOKEN is empty; required for history ingestion. "
+                "Generate a token at https://github.com/settings/tokens "
+                "(public_repo scope is sufficient for public repos)."
+            ),
+        )
+
+    # Reflect in-progress immediately so an instant poll shows the right state.
+    repo.history_ingestion_status = "in_progress"
+    await session.commit()
+
+    background_tasks.add_task(ingest_history, repo_id, app_db.SessionLocal)
+    return HistoryIngestionTriggerResponse(repo_id=repo_id, history_ingestion_status="in_progress")
+
+
+@router.get(
+    "/repos/{repo_id}/history-ingestion-status",
+    response_model=HistoryIngestionStatusResponse,
+)
+async def history_ingestion_status(
+    repo_id: int, session: SessionDep
+) -> HistoryIngestionStatusResponse:
+    repo = await session.get(Repo, repo_id)
+    if repo is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"repo id={repo_id} not found")
+    counts = await select_history_counts(session, repo_id)
+    err = (repo.history_ingestion_state or {}).get("error")
+    return HistoryIngestionStatusResponse(
+        repo_id=repo_id,
+        history_ingestion_status=repo.history_ingestion_status,
+        history_ingestion_progress=repo.history_ingestion_progress,
+        commits_count=counts["commits"],
+        pull_requests_count=counts["pull_requests"],
+        issues_count=counts["issues"],
+        error=err,
     )
 
 

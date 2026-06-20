@@ -39,6 +39,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if result.rowcount:
             log.warning("reset %d orphaned in_progress embedding job(s) to failed", result.rowcount)
 
+        # Same orphan-recovery pattern for history ingestion (Slice 5b). A
+        # daemon crash mid-fetch leaves the repo stuck; reset so the UI shows
+        # a retryable state and re-running the endpoint resumes from the
+        # cursor in history_ingestion_state.
+        result = await session.execute(
+            update(Repo)
+            .where(Repo.history_ingestion_status == "in_progress")
+            .values(history_ingestion_status="failed")
+        )
+        if result.rowcount:
+            log.warning(
+                "reset %d orphaned in_progress history-ingestion job(s) to failed",
+                result.rowcount,
+            )
+
         stored_dim = await session.scalar(select(EntityEmbedding.dimension).limit(1))
         if stored_dim is not None:
             active_dim = get_embedder().dimension

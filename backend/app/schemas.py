@@ -120,6 +120,27 @@ class EmbeddingStatusResponse(BaseModel):
     chunks_embedded: int
 
 
+# --- History ingestion (Slice 5b, ADR 0011) -----------------------------
+
+
+class HistoryIngestionTriggerResponse(BaseModel):
+    """Returned by POST /repos/{repo_id}/ingest-history (202)."""
+
+    repo_id: int
+    history_ingestion_status: str
+
+
+class HistoryIngestionStatusResponse(BaseModel):
+    repo_id: int
+    history_ingestion_status: str  # pending | in_progress | done | failed
+    history_ingestion_progress: float
+    commits_count: int
+    pull_requests_count: int
+    issues_count: int
+    # Latest error message captured in repo.history_ingestion_state, if any.
+    error: str | None = None
+
+
 class SearchRequest(BaseModel):
     repo_id: int
     query: str = Field(..., min_length=1)
