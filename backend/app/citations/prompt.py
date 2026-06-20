@@ -26,8 +26,10 @@ from general knowledge.
 inline code span -- citations belong in prose only.
 6. Be concise and specific (function names, file paths).
 
-Example -- illustrative answer format (c1, c2 below are placeholders; your real excerpts follow):
-The login() helper checks the bcrypt hash [chunk:c1] and refreshes the session cookie on success [chunk:c2]. Token expiration uses a 24-hour window [chunk:none]."""
+Example -- illustrative answer format (c1, c2 below are placeholders; your \
+real excerpts follow):
+The login() helper checks the bcrypt hash [chunk:c1] and refreshes the session \
+cookie on success [chunk:c2]. Token expiration uses a 24-hour window [chunk:none]."""
 
 USER_TEMPLATE = """\
 Question: {question}

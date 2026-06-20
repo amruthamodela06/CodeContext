@@ -16,12 +16,14 @@ from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.embeddings import get_embedder
-from app.models import ChunkEmbedding, CodeChunk, Repo
+from app.models import CodeChunk, EntityEmbedding, Repo
 
 log = logging.getLogger(__name__)
 
 _BATCH_SIZE = 32
-_HNSW_INDEX = "chunk_embedding_hnsw_cos"
+# Single HNSW index across all entity_embedding rows (chunk / commit / pr /
+# issue post-Slice-5). The polymorphic widening doesn't change vector ops.
+_HNSW_INDEX = "entity_embedding_hnsw_cos"
 
 
 def _batches(rows: list, size: int):
@@ -49,8 +51,15 @@ async def embed_repo(repo_id: int, session_factory: async_sessionmaker[AsyncSess
         repo.embedding_progress = 0.0
         await session.commit()
 
-        # Idempotent re-embed: clear this repo's prior vectors.
-        await session.execute(delete(ChunkEmbedding).where(ChunkEmbedding.repo_id == repo_id))
+        # Idempotent re-embed: clear this repo's prior CHUNK vectors only.
+        # Slice 5's commit/PR/issue embeddings live in the same table but are
+        # managed by a separate job — we must not stomp them here.
+        await session.execute(
+            delete(EntityEmbedding).where(
+                EntityEmbedding.repo_id == repo_id,
+                EntityEmbedding.entity_type == "chunk",
+            )
+        )
         await session.commit()
 
         rows = (
@@ -84,8 +93,9 @@ async def embed_repo(repo_id: int, session_factory: async_sessionmaker[AsyncSess
                 )
             else:
                 session.add_all(
-                    ChunkEmbedding(
-                        chunk_id=cid,
+                    EntityEmbedding(
+                        entity_type="chunk",
+                        entity_id=cid,
                         repo_id=repo_id,
                         embedding=vec,
                         model_name=embedder.name,
@@ -122,7 +132,7 @@ async def _ensure_hnsw_index(session: AsyncSession) -> None:
     await session.execute(
         text(
             f"CREATE INDEX IF NOT EXISTS {_HNSW_INDEX} "
-            "ON chunk_embedding USING hnsw (embedding vector_cosine_ops) "
+            "ON entity_embedding USING hnsw (embedding vector_cosine_ops) "
             "WITH (m = 16, ef_construction = 64)"
         )
     )

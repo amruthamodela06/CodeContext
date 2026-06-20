@@ -25,7 +25,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import ingest
-from app.models import ChunkEmbedding
+from app.models import EntityEmbedding
 
 pytestmark = pytest.mark.usefixtures("_clean_db")
 
@@ -80,12 +80,20 @@ async def test_embed_creates_one_vector_per_chunk(
     repo_id = await _ingest_and_embed(client, sample_repo, monkeypatch)
 
     count = await session.scalar(
-        select(func.count(ChunkEmbedding.id)).where(ChunkEmbedding.repo_id == repo_id)
+        select(func.count(EntityEmbedding.id)).where(
+            EntityEmbedding.repo_id == repo_id,
+            EntityEmbedding.entity_type == "chunk",
+        )
     )
     assert count == 2
 
     # Vectors carry the model identity + dimension.
-    row = await session.scalar(select(ChunkEmbedding).where(ChunkEmbedding.repo_id == repo_id))
+    row = await session.scalar(
+        select(EntityEmbedding).where(
+            EntityEmbedding.repo_id == repo_id,
+            EntityEmbedding.entity_type == "chunk",
+        )
+    )
     assert row.model_name == "fake-embedder"
     assert row.dimension == 384
 
@@ -118,7 +126,10 @@ async def test_reembed_is_idempotent(
     assert second.status_code == 202
 
     count = await session.scalar(
-        select(func.count(ChunkEmbedding.id)).where(ChunkEmbedding.repo_id == repo_id)
+        select(func.count(EntityEmbedding.id)).where(
+            EntityEmbedding.repo_id == repo_id,
+            EntityEmbedding.entity_type == "chunk",
+        )
     )
     assert count == 2
 

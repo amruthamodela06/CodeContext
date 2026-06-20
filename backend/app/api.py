@@ -22,7 +22,7 @@ from app.embeddings import get_embedder
 from app.embeddings.orchestrator import embed_repo
 from app.ingest import MAX_FILE_COUNT, FileCountExceededError, clone_repo, ingest_repo
 from app.llm import get_llm_provider
-from app.models import ChunkEmbedding, CodeChunk, File, Repo
+from app.models import CodeChunk, EntityEmbedding, File, Repo
 from app.schemas import (
     ChunkOut,
     ChunkSummary,
@@ -267,7 +267,10 @@ async def embedding_status(repo_id: int, session: SessionDep) -> EmbeddingStatus
         select(func.count(CodeChunk.id)).where(CodeChunk.repo_id == repo_id)
     )
     chunks_embedded = await session.scalar(
-        select(func.count(ChunkEmbedding.id)).where(ChunkEmbedding.repo_id == repo_id)
+        select(func.count(EntityEmbedding.id)).where(
+            EntityEmbedding.repo_id == repo_id,
+            EntityEmbedding.entity_type == "chunk",
+        )
     )
     return EmbeddingStatusResponse(
         repo_id=repo_id,
@@ -288,13 +291,20 @@ async def retrieve_chunks(
     query_vec = await asyncio.to_thread(embedder.embed_one, query)
 
     # pgvector cosine distance (<=>). similarity = 1 - distance.
-    distance = ChunkEmbedding.embedding.cosine_distance(query_vec).label("distance")
+    # entity_embedding is polymorphic since Slice 5; filter to chunk rows in
+    # the join so the cosine search only ranks code (commits/PRs/issues come
+    # in via multi-hop expansion in Slice 5f, not flat retrieval).
+    distance = EntityEmbedding.embedding.cosine_distance(query_vec).label("distance")
     rows = (
         await session.execute(
             select(CodeChunk, File.path, distance)
-            .join(ChunkEmbedding, ChunkEmbedding.chunk_id == CodeChunk.id)
+            .join(
+                EntityEmbedding,
+                (EntityEmbedding.entity_id == CodeChunk.id)
+                & (EntityEmbedding.entity_type == "chunk"),
+            )
             .join(File, File.id == CodeChunk.file_id)
-            .where(ChunkEmbedding.repo_id == repo_id)
+            .where(EntityEmbedding.repo_id == repo_id)
             .order_by(distance)
             .limit(top_k)
         )

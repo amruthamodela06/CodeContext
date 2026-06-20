@@ -10,7 +10,7 @@ from app.api import router
 from app.config import get_settings
 from app.db import SessionLocal
 from app.embeddings import get_embedder
-from app.models import ChunkEmbedding, Repo
+from app.models import EntityEmbedding, Repo
 
 log = logging.getLogger(__name__)
 settings = get_settings()
@@ -39,12 +39,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if result.rowcount:
             log.warning("reset %d orphaned in_progress embedding job(s) to failed", result.rowcount)
 
-        stored_dim = await session.scalar(select(ChunkEmbedding.dimension).limit(1))
+        stored_dim = await session.scalar(select(EntityEmbedding.dimension).limit(1))
         if stored_dim is not None:
             active_dim = get_embedder().dimension
             if stored_dim != active_dim:
                 raise RuntimeError(
-                    f"chunk_embedding rows are {stored_dim}-dim but the active "
+                    f"entity_embedding rows are {stored_dim}-dim but the active "
                     f"embedder ({get_embedder().name}) is {active_dim}-dim. "
                     "Re-embed all repos or fix EMBEDDING_PROVIDER."
                 )
