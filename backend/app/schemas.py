@@ -118,6 +118,24 @@ class EmbeddingStatusResponse(BaseModel):
     embedding_progress: float  # 0.0 - 1.0
     chunks_total: int
     chunks_embedded: int
+    # Per-type counts (Slice 5d: orchestrator now embeds all 4 entity types
+    # into entity_embedding). Non-chunk counts stay 0 until /ingest-history
+    # has populated commit / PR / issue rows.
+    commits_total: int = 0
+    commits_embedded: int = 0
+    prs_total: int = 0
+    prs_embedded: int = 0
+    issues_total: int = 0
+    issues_embedded: int = 0
+    # Per-type counts (Slice 5d: orchestrator now embeds all 4 entity types
+    # into entity_embedding). Non-chunk counts will be 0 until /ingest-history
+    # has populated commit/PR/issue rows.
+    commits_total: int = 0
+    commits_embedded: int = 0
+    prs_total: int = 0
+    prs_embedded: int = 0
+    issues_total: int = 0
+    issues_embedded: int = 0
 
 
 # --- History ingestion (Slice 5b, ADR 0011) -----------------------------

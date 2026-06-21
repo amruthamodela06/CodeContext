@@ -25,7 +25,7 @@ from app.graph import build_graph, select_edge_counts_by_type
 from app.history import ingest_history, select_history_counts
 from app.ingest import MAX_FILE_COUNT, FileCountExceededError, clone_repo, ingest_repo
 from app.llm import get_llm_provider
-from app.models import CodeChunk, EntityEmbedding, File, Repo
+from app.models import CodeChunk, Commit, EntityEmbedding, File, Issue, PullRequest, Repo
 from app.schemas import (
     ChunkOut,
     ChunkSummary,
@@ -273,18 +273,36 @@ async def embedding_status(repo_id: int, session: SessionDep) -> EmbeddingStatus
     chunks_total = await session.scalar(
         select(func.count(CodeChunk.id)).where(CodeChunk.repo_id == repo_id)
     )
-    chunks_embedded = await session.scalar(
-        select(func.count(EntityEmbedding.id)).where(
-            EntityEmbedding.repo_id == repo_id,
-            EntityEmbedding.entity_type == "chunk",
-        )
+    commits_total = await session.scalar(
+        select(func.count(Commit.id)).where(Commit.repo_id == repo_id)
     )
+    prs_total = await session.scalar(
+        select(func.count(PullRequest.id)).where(PullRequest.repo_id == repo_id)
+    )
+    issues_total = await session.scalar(
+        select(func.count(Issue.id)).where(Issue.repo_id == repo_id)
+    )
+    # Per-type embedded counts: group_by entity_type in one query.
+    embedded_rows = (
+        await session.execute(
+            select(EntityEmbedding.entity_type, func.count(EntityEmbedding.id))
+            .where(EntityEmbedding.repo_id == repo_id)
+            .group_by(EntityEmbedding.entity_type)
+        )
+    ).all()
+    embedded_by_type = dict(embedded_rows)
     return EmbeddingStatusResponse(
         repo_id=repo_id,
         embedding_status=repo.embedding_status,
         embedding_progress=repo.embedding_progress,
         chunks_total=chunks_total or 0,
-        chunks_embedded=chunks_embedded or 0,
+        chunks_embedded=embedded_by_type.get("chunk", 0),
+        commits_total=commits_total or 0,
+        commits_embedded=embedded_by_type.get("commit", 0),
+        prs_total=prs_total or 0,
+        prs_embedded=embedded_by_type.get("pr", 0),
+        issues_total=issues_total or 0,
+        issues_embedded=embedded_by_type.get("issue", 0),
     )
 
 

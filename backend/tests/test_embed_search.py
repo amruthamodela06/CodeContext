@@ -182,6 +182,94 @@ async def test_embed_404_unknown_repo(client: AsyncClient) -> None:
     assert r.status_code == 404
 
 
+# --- Slice 5d: orchestrator embeds commits / PRs / issues too --------------
+
+
+async def test_embed_repo_widens_to_all_entity_types(session: AsyncSession) -> None:
+    """Seed one row per non-chunk entity type; verify embed_repo populates
+    entity_embedding with one row per type."""
+    from datetime import UTC, datetime
+
+    import app.db as app_db
+    from app.embeddings.orchestrator import embed_repo
+    from app.models import (
+        CodeChunk,
+        Commit,
+        File,
+        Issue,
+        PullRequest,
+        Repo,
+    )
+
+    repo = Repo(owner="o", name="r", default_branch="main")
+    session.add(repo)
+    await session.commit()
+
+    file = File(repo_id=repo.id, path="x.py", size_bytes=10, language="Python")
+    session.add(file)
+    await session.commit()
+    session.add_all(
+        [
+            CodeChunk(
+                repo_id=repo.id,
+                file_id=file.id,
+                chunk_type="function",
+                name="f",
+                start_line=1,
+                end_line=3,
+                content="def f(): pass",
+                language="Python",
+            ),
+            Commit(repo_id=repo.id, sha="a" * 40, message="Add f() helper"),
+            PullRequest(
+                repo_id=repo.id,
+                number=1,
+                title="add f()",
+                body="adds f helper",
+                state="merged",
+                created_at=datetime.now(UTC),
+            ),
+            Issue(
+                repo_id=repo.id,
+                number=10,
+                title="missing f",
+                body="we need f",
+                state="closed",
+                created_at=datetime.now(UTC),
+            ),
+        ]
+    )
+    await session.commit()
+
+    total = await embed_repo(repo.id, app_db.SessionLocal)
+    assert total == 4  # one per entity type
+
+    counts = dict(
+        (
+            await session.execute(
+                select(EntityEmbedding.entity_type, func.count(EntityEmbedding.id))
+                .where(EntityEmbedding.repo_id == repo.id)
+                .group_by(EntityEmbedding.entity_type)
+            )
+        ).all()
+    )
+    assert counts == {"chunk": 1, "commit": 1, "pr": 1, "issue": 1}
+
+
+async def test_embedding_status_reports_per_type_counts(
+    client: AsyncClient, sample_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even with no history yet, status surfaces the new per-type fields
+    (zeros for commit/pr/issue) instead of breaking the schema."""
+    repo_id = await _ingest_and_embed(client, sample_repo, monkeypatch)
+    r = await client.get(f"/repos/{repo_id}/embedding-status")
+    body = r.json()
+    assert body["chunks_total"] == 2 and body["chunks_embedded"] == 2
+    for key in ("commits", "prs", "issues"):
+        assert body[f"{key}_total"] == 0
+        assert body[f"{key}_embedded"] == 0
+
+
 async def test_embedding_status_404_unknown_repo(client: AsyncClient) -> None:
     r = await client.get("/repos/99999/embedding-status")
     assert r.status_code == 404
