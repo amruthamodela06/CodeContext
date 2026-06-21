@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     # §6.5; raise for a backfill ingest, lower for a fast demo.
     history_ingestion_months: int = Field(default=12, ge=1, le=120)
 
+    # --- Query classifier (Slice 5e, ADR 0012) ---
+    # 'keyword' (default) -- sub-ms, no LLM call. 'llm' -- one extra
+    # LLM call per query; better on ambiguous phrasings, costs latency.
+    query_classifier: str = Field(default="keyword")
+
     backend_host: str = "0.0.0.0"
     backend_port: int = 8000
     frontend_origin: str = "http://localhost:3000"
