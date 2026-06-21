@@ -170,15 +170,15 @@ def test_context_from_results_assigns_sequential_ids():
     ]
     context = CitationContext.from_results(rows)
     assert [c.display_id for c in context.chunks] == ["c1", "c2"]
-    assert context.by_display_id["c1"].chunk_id == 11
-    assert context.by_display_id["c2"].chunk_id == 22
+    assert context.by_token[("chunk", "c1")].chunk_id == 11
+    assert context.by_token[("chunk", "c2")].chunk_id == 22
 
 
 def test_render_excerpts_includes_ids_paths_and_fences():
     context = _ctx("c1", "c2")
     rendered = context.render_excerpts()
-    assert "[c1] app/x.py:10-20 (function do_thing)" in rendered
-    assert "[c2] app/x.py:10-20 (function do_thing)" in rendered
+    assert "[c1] code: app/x.py:10-20 (function do_thing)" in rendered
+    assert "[c2] code: app/x.py:10-20 (function do_thing)" in rendered
     assert "```python" in rendered
 
 
@@ -197,6 +197,94 @@ def test_build_messages_has_system_and_user_with_excerpts():
 def test_module_exports_resolve_and_parse():
     # guard against the package __init__ drifting from the modules
     assert hasattr(ctx_mod, "CitationContext")
+
+
+# --- Slice 5f: typed tokens (chunk / commit / pr / issue) ------------------
+
+
+def test_parser_extracts_all_four_token_types():
+    cites, _ = parser.parse(
+        "Per [chunk:c1] the audit [issue:i4] led to a fix [pr:p3] in [commit:m2]."
+    )
+    pairs = [(c.entity_type, c.display_id) for c in cites]
+    assert pairs == [("chunk", "c1"), ("issue", "i4"), ("pr", "p3"), ("commit", "m2")]
+
+
+def test_parser_rejects_unknown_entity_types():
+    # 'file' isn't in the allowed type set; should not parse.
+    cites, _ = parser.parse("Bad [file:f1] but ok [chunk:c1].")
+    assert [(c.entity_type, c.display_id) for c in cites] == [("chunk", "c1")]
+
+
+def test_validator_resolves_typed_entities_to_per_type_permalinks():
+    from datetime import UTC, datetime
+
+    from app.citations.context import CitedCommit, CitedIssue, CitedPR
+
+    ctx = CitationContext(
+        chunks=[_chunk("c1", chunk_id=11, path="auth/login.py")],
+        commits=[
+            CitedCommit(
+                display_id="m1",
+                commit_id=22,
+                sha="deadbeefcafe" + "0" * 28,
+                author_name="Jane",
+                authored_at=datetime.now(UTC),
+                message="Switch to bcrypt",
+            )
+        ],
+        prs=[
+            CitedPR(
+                display_id="p1",
+                pr_id=33,
+                number=234,
+                title="Switch auth to bcrypt",
+                body=None,
+                state="merged",
+                merged_at=datetime.now(UTC),
+            )
+        ],
+        issues=[
+            CitedIssue(
+                display_id="i1",
+                issue_id=44,
+                number=189,
+                title="Auth uses MD5",
+                body=None,
+                state="closed",
+                closed_at=datetime.now(UTC),
+            )
+        ],
+    )
+    cites, _ = parser.parse("X [chunk:c1] Y [commit:m1] Z [pr:p1] W [issue:i1] V [pr:p99].")
+    resolved = validator.resolve(cites, ctx, owner="o", name="r", ref="abc")
+    by_key = {(r.entity_type, r.display_id): r for r in resolved}
+
+    assert by_key[("chunk", "c1")].status == "valid"
+    assert by_key[("chunk", "c1")].permalink == (
+        "https://github.com/o/r/blob/abc/auth/login.py#L10-L20"
+    )
+    assert by_key[("commit", "m1")].status == "valid"
+    assert by_key[("commit", "m1")].permalink == (
+        "https://github.com/o/r/commit/deadbeefcafe" + "0" * 28
+    )
+    assert by_key[("pr", "p1")].status == "valid"
+    assert by_key[("pr", "p1")].permalink == "https://github.com/o/r/pull/234"
+    assert by_key[("issue", "i1")].status == "valid"
+    assert by_key[("issue", "i1")].permalink == "https://github.com/o/r/issues/189"
+    assert by_key[("pr", "p99")].status == "invalid"
+
+
+def test_historical_why_prompt_includes_typed_token_examples():
+    from app.citations import build_historical_why_messages
+
+    ctx = _ctx("c1")
+    messages = build_historical_why_messages("o", "r", "why?", ctx)
+    sys_content = messages[0].content
+    # Prompt must teach all four typed tokens AND the chain-tracing pattern.
+    for tok in ("[chunk:cN]", "[commit:mN]", "[pr:pN]", "[issue:iN]"):
+        assert tok in sys_content
+    assert "chain" in sys_content.lower()
 
 
 def test_system_prompt_includes_one_shot_example():

@@ -11,10 +11,10 @@ rather than silently dropped. See ADR 0010.
 import re
 from dataclasses import dataclass
 
-# Shape-only. Accepts the `none` sentinel or 1-16 chars of [A-Za-z0-9_-].
-# Rejects empty ([chunk:]), whitespace-padded ([chunk: c1 ]), and unterminated
-# ([chunk:c1) forms by construction.
-_TOKEN_RE = re.compile(r"\[chunk:(none|[A-Za-z0-9_-]{1,16})\]")
+# Shape-only. Type is chunk|commit|pr|issue (Slice 5f widened); id is the
+# `none` sentinel or 1-16 chars of [A-Za-z0-9_-]. Rejects empty ([chunk:]),
+# whitespace-padded ([chunk: c1 ]), and unterminated forms by construction.
+_TOKEN_RE = re.compile(r"\[(chunk|commit|pr|issue):(none|[A-Za-z0-9_-]{1,16})\]")
 # A fence opener/closer is a line whose first non-space content is >=3 backticks
 # or >=3 tildes.
 _FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
@@ -22,7 +22,8 @@ _FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
 
 @dataclass(frozen=True)
 class ParsedCitation:
-    display_id: str  # "c1" or "none"
+    entity_type: str  # "chunk" | "commit" | "pr" | "issue"
+    display_id: str  # type-scoped short id (e.g. "c1", "m1") or "none"
     start: int  # char offset of "[" in the original answer
     end: int  # char offset just past "]"
 
@@ -91,7 +92,8 @@ def parse(answer: str) -> tuple[list[ParsedCitation], list[str]]:
         for tok in _TOKEN_RE.finditer(scrubbed):
             citations.append(
                 ParsedCitation(
-                    display_id=tok.group(1),
+                    entity_type=tok.group(1),
+                    display_id=tok.group(2),
                     start=offset + tok.start(),
                     end=offset + tok.end(),
                 )
