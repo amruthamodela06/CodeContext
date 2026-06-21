@@ -141,6 +141,28 @@ class HistoryIngestionStatusResponse(BaseModel):
     error: str | None = None
 
 
+# --- Graph build (Slice 5c, ADR 0012) -----------------------------------
+
+
+class GraphBuildTriggerResponse(BaseModel):
+    """Returned by POST /repos/{repo_id}/build-graph (202)."""
+
+    repo_id: int
+    graph_status: str
+
+
+class GraphStatusResponse(BaseModel):
+    repo_id: int
+    graph_status: str  # pending | in_progress | done | failed
+    graph_progress: float
+    # Per-type live edge counts from entity_edge.
+    introduced_by_count: int
+    part_of_count: int
+    references_issue_count: int
+    closed_by_count: int
+    error: str | None = None
+
+
 class SearchRequest(BaseModel):
     repo_id: int
     query: str = Field(..., min_length=1)

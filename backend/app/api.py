@@ -21,6 +21,7 @@ from app.config import get_settings
 from app.db import get_session
 from app.embeddings import get_embedder
 from app.embeddings.orchestrator import embed_repo
+from app.graph import build_graph, select_edge_counts_by_type
 from app.history import ingest_history, select_history_counts
 from app.ingest import MAX_FILE_COUNT, FileCountExceededError, clone_repo, ingest_repo
 from app.llm import get_llm_provider
@@ -32,6 +33,8 @@ from app.schemas import (
     EmbeddingStatusResponse,
     EmbedTriggerResponse,
     FileOut,
+    GraphBuildTriggerResponse,
+    GraphStatusResponse,
     HistoryIngestionStatusResponse,
     HistoryIngestionTriggerResponse,
     IngestRequest,
@@ -320,6 +323,55 @@ async def trigger_history_ingestion(
 
     background_tasks.add_task(ingest_history, repo_id, app_db.SessionLocal)
     return HistoryIngestionTriggerResponse(repo_id=repo_id, history_ingestion_status="in_progress")
+
+
+@router.post(
+    "/repos/{repo_id}/build-graph",
+    response_model=GraphBuildTriggerResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    description=(
+        "Kick off background graph construction. Re-clones the repo, runs "
+        "per-file git blame to populate chunk->commit edges, matches PR "
+        "merge_commit_sha to commits for commit->pr edges, and parses PR "
+        "titles/bodies for `fixes #N` style references to write pr->issue "
+        "(and inverse closed_by) edges. Requires /chunk + /ingest-history "
+        "to have completed."
+    ),
+)
+async def trigger_graph_build(
+    repo_id: int,
+    session: SessionDep,
+    background_tasks: BackgroundTasks,
+) -> GraphBuildTriggerResponse:
+    repo = await session.get(Repo, repo_id)
+    if repo is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"repo id={repo_id} not found")
+    repo.graph_status = "in_progress"
+    await session.commit()
+    background_tasks.add_task(build_graph, repo_id, app_db.SessionLocal)
+    return GraphBuildTriggerResponse(repo_id=repo_id, graph_status="in_progress")
+
+
+@router.get(
+    "/repos/{repo_id}/graph-status",
+    response_model=GraphStatusResponse,
+)
+async def graph_status(repo_id: int, session: SessionDep) -> GraphStatusResponse:
+    repo = await session.get(Repo, repo_id)
+    if repo is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"repo id={repo_id} not found")
+    counts = await select_edge_counts_by_type(session, repo_id)
+    err = (repo.graph_state or {}).get("error")
+    return GraphStatusResponse(
+        repo_id=repo_id,
+        graph_status=repo.graph_status,
+        graph_progress=repo.graph_progress,
+        introduced_by_count=counts["introduced_by"],
+        part_of_count=counts["part_of"],
+        references_issue_count=counts["references_issue"],
+        closed_by_count=counts["closed_by"],
+        error=err,
+    )
 
 
 @router.get(

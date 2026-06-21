@@ -54,6 +54,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 result.rowcount,
             )
 
+        # Same for the graph build job (Slice 5c).
+        result = await session.execute(
+            update(Repo).where(Repo.graph_status == "in_progress").values(graph_status="failed")
+        )
+        if result.rowcount:
+            log.warning(
+                "reset %d orphaned in_progress graph-build job(s) to failed",
+                result.rowcount,
+            )
+
         stored_dim = await session.scalar(select(EntityEmbedding.dimension).limit(1))
         if stored_dim is not None:
             active_dim = get_embedder().dimension

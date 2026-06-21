@@ -58,6 +58,12 @@ class Repo(Base):
         Float, server_default="0.0", nullable=False
     )
     history_ingestion_state: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    # Graph-build job lifecycle (Slice 5c, ADR 0012). Depends on both chunking
+    # (Slice 2) and history ingestion (Slice 5b) being done; populates
+    # entity_edge with the four cross-domain edge types.
+    graph_status: Mapped[str] = mapped_column(String(16), server_default="pending", nullable=False)
+    graph_progress: Mapped[float] = mapped_column(Float, server_default="0.0", nullable=False)
+    graph_state: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
 
     files: Mapped[list["File"]] = relationship(back_populates="repo", cascade="all, delete-orphan")
     code_chunks: Mapped[list["CodeChunk"]] = relationship(
