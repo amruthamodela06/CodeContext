@@ -170,6 +170,10 @@ export type CitedChunkItem = {
   name: string | null;
   content: string;
   similarity: number;
+  // Slice 5h fix: backend now attaches a permalink to every retrieved
+  // entity (not just cited ones) so Sources-panel rows always have an
+  // Open-on-GitHub link.
+  permalink?: string;
 };
 
 export type CitationStatus = "valid" | "none" | "invalid";
@@ -186,6 +190,7 @@ export type CitedCommitItem = {
   authored_at: string | null;
   message: string;
   similarity: number;
+  permalink?: string;
 };
 
 export type CitedPRItem = {
@@ -198,6 +203,7 @@ export type CitedPRItem = {
   state: string;
   merged_at: string | null;
   similarity: number;
+  permalink?: string;
 };
 
 export type CitedIssueItem = {
@@ -210,6 +216,7 @@ export type CitedIssueItem = {
   state: string;
   closed_at: string | null;
   similarity: number;
+  permalink?: string;
 };
 
 export type TypedSources = {

@@ -481,17 +481,39 @@ _OUT_OF_SCOPE_ANSWER = (
 )
 
 
-def _ctx_to_sources_payload(ctx) -> dict:
+def _ctx_to_sources_payload(ctx, owner: str, name: str, ref: str) -> dict:
     """Typed dict for the SSE 'sources' event. Frontend (5h) renders each
     list with its own panel + icon; per-type lists keep the wire shape
     self-describing without a flat polymorphic union.
+
+    Permalinks are attached HERE rather than only on ResolvedCitation so
+    every retrieved entity has an Open-on-GitHub link in the Sources
+    panel -- not just the ones the model happened to cite.
     """
-    return {
-        "chunks": [c.model_dump(mode="json") for c in ctx.chunks],
-        "commits": [m.model_dump(mode="json") for m in ctx.commits],
-        "prs": [p.model_dump(mode="json") for p in ctx.prs],
-        "issues": [i.model_dump(mode="json") for i in ctx.issues],
-    }
+    chunks = []
+    for c in ctx.chunks:
+        d = c.model_dump(mode="json")
+        d["permalink"] = (
+            f"https://github.com/{owner}/{name}/blob/{ref}/"
+            f"{c.file_path}#L{c.start_line}-L{c.end_line}"
+        )
+        chunks.append(d)
+    commits = []
+    for m in ctx.commits:
+        d = m.model_dump(mode="json")
+        d["permalink"] = f"https://github.com/{owner}/{name}/commit/{m.sha}"
+        commits.append(d)
+    prs = []
+    for p in ctx.prs:
+        d = p.model_dump(mode="json")
+        d["permalink"] = f"https://github.com/{owner}/{name}/pull/{p.number}"
+        prs.append(d)
+    issues = []
+    for i in ctx.issues:
+        d = i.model_dump(mode="json")
+        d["permalink"] = f"https://github.com/{owner}/{name}/issues/{i.number}"
+        issues.append(d)
+    return {"chunks": chunks, "commits": commits, "prs": prs, "issues": issues}
 
 
 @router.post(
@@ -556,7 +578,7 @@ async def query(req: QueryRequest, session: SessionDep):
             )
 
         async def oos_event_gen() -> AsyncIterator[dict]:
-            yield _sse("sources", _ctx_to_sources_payload(ctx))
+            yield _sse("sources", _ctx_to_sources_payload(ctx, owner, name, ref))
             yield _sse("token", {"text": canned})
             yield _sse("citations", {"citations": [], "warnings": [], "trace": trace})
             yield _sse("done", {})
@@ -591,7 +613,7 @@ async def query(req: QueryRequest, session: SessionDep):
     async def event_gen() -> AsyncIterator[dict]:
         # All retrieved entities up front: typed dict so the frontend renders
         # per-type panels for chunks / commits / PRs / issues (Slice 5h).
-        yield _sse("sources", _ctx_to_sources_payload(ctx))
+        yield _sse("sources", _ctx_to_sources_payload(ctx, owner, name, ref))
 
         parts: list[str] = []
         try:

@@ -3,6 +3,7 @@
 import Editor from "@monaco-editor/react";
 import {
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -69,6 +70,10 @@ export function QueryPanel({ repoId }: { repoId: number }) {
   const [expanded, setExpanded] = useState<ExpandedKey>(null);
   const [showDebug, setShowDebug] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  // Wrapped around the expanded entity view so we can scroll it into focus
+  // when a source row at the bottom of the page is clicked (otherwise the
+  // view pops up above the Sources panel, off-screen, and looks broken).
+  const expandedRef = useRef<HTMLDivElement | null>(null);
 
   // Index every cited entity by its (type, display_id) for chip expansion.
   const entityIndex = useMemo(() => {
@@ -138,6 +143,15 @@ export function QueryPanel({ repoId }: { repoId: number }) {
     setExpanded((cur) => (cur === key ? null : key));
   }, []);
 
+  // After the expanded view mounts/updates, scroll it into focus so a click
+  // on a row at the bottom of Sources doesn't silently open the panel
+  // somewhere off-screen above.
+  useEffect(() => {
+    if (expanded && expandedRef.current) {
+      expandedRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [expanded]);
+
   const rendered = useMemo(
     () => renderAnswer(answer, citationIndex, toggleExpand),
     [answer, citationIndex, toggleExpand],
@@ -196,10 +210,15 @@ export function QueryPanel({ repoId }: { repoId: number }) {
       )}
 
       {expandedEntity && (
-        <ExpandedEntityView
-          entity={expandedEntity}
-          permalink={expandedCite?.permalink ?? null}
-        />
+        <div ref={expandedRef}>
+          <ExpandedEntityView
+            entity={expandedEntity}
+            // Prefer the permalink the backend attached to every entity in
+            // the sources payload (Slice 5h fix). Fall back to the
+            // citation-derived one for legacy / edge cases.
+            permalink={expandedEntity.permalink ?? expandedCite?.permalink ?? null}
+          />
+        </div>
       )}
 
       {totalSources > 0 && (
