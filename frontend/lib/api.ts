@@ -156,6 +156,10 @@ export async function search(
 // --- Cited Q&A / streaming query (Slice 4, ADR 0010) ---
 
 export type CitedChunkItem = {
+  // Slice 5: discriminator added so CitedChunk/Commit/PR/Issue form a tagged
+  // union the QueryPanel can branch on. Optional so older JSON payloads
+  // (Slice 4 servers) still parse -- the backend always sends 'chunk' now.
+  type?: "chunk";
   display_id: string;
   chunk_id: number;
   file_path: string;
@@ -169,21 +173,90 @@ export type CitedChunkItem = {
 };
 
 export type CitationStatus = "valid" | "none" | "invalid";
+export type EntityType = "chunk" | "commit" | "pr" | "issue";
+
+// --- Slice 5: typed citable entities (commits / PRs / issues) ---
+
+export type CitedCommitItem = {
+  type: "commit";
+  display_id: string;
+  commit_id: number;
+  sha: string;
+  author_name: string | null;
+  authored_at: string | null;
+  message: string;
+  similarity: number;
+};
+
+export type CitedPRItem = {
+  type: "pr";
+  display_id: string;
+  pr_id: number;
+  number: number;
+  title: string;
+  body: string | null;
+  state: string;
+  merged_at: string | null;
+  similarity: number;
+};
+
+export type CitedIssueItem = {
+  type: "issue";
+  display_id: string;
+  issue_id: number;
+  number: number;
+  title: string;
+  body: string | null;
+  state: string;
+  closed_at: string | null;
+  similarity: number;
+};
+
+export type TypedSources = {
+  chunks: CitedChunkItem[];
+  commits: CitedCommitItem[];
+  prs: CitedPRItem[];
+  issues: CitedIssueItem[];
+};
+
+// Slice 5g: trace payload carrying classifier + multi-hop debug info.
+export type QueryTrace = {
+  classifier?: {
+    method: string;
+    confidence: number;
+    fallback_used: boolean;
+  };
+  category?: string;
+  seed_chunk_ids?: number[];
+  expansion_candidates?: number;
+  reranked_count?: number;
+};
 
 export type ResolvedCitation = {
+  entity_type: EntityType;
   display_id: string;
   status: CitationStatus;
+  // Type-specific (only one set per row).
   chunk_id: number | null;
+  commit_sha: string | null;
+  pr_number: number | null;
+  issue_number: number | null;
+  // Shared display fields.
   file_path: string | null;
   start_line: number | null;
   end_line: number | null;
+  title: string | null;
   permalink: string | null;
 };
 
 export type QueryStreamHandlers = {
-  onSources?: (sources: CitedChunkItem[]) => void;
+  onSources?: (sources: TypedSources) => void;
   onToken?: (text: string) => void;
-  onCitations?: (citations: ResolvedCitation[], warnings: string[]) => void;
+  onCitations?: (
+    citations: ResolvedCitation[],
+    warnings: string[],
+    trace: QueryTrace,
+  ) => void;
   onError?: (message: string, stage: string) => void;
   onDone?: () => void;
   signal?: AbortSignal;
@@ -203,7 +276,13 @@ function dispatchSseFrame(frame: string, handlers: QueryStreamHandlers): void {
   const raw = JSON.parse(dataLines.join("\n")) as Record<string, unknown>;
   switch (event) {
     case "sources":
-      handlers.onSources?.(raw.sources as CitedChunkItem[]);
+      // Slice 5g: 'sources' payload is now {chunks, commits, prs, issues}.
+      handlers.onSources?.({
+        chunks: (raw.chunks as CitedChunkItem[]) ?? [],
+        commits: (raw.commits as CitedCommitItem[]) ?? [],
+        prs: (raw.prs as CitedPRItem[]) ?? [],
+        issues: (raw.issues as CitedIssueItem[]) ?? [],
+      });
       break;
     case "token":
       handlers.onToken?.(raw.text as string);
@@ -212,6 +291,7 @@ function dispatchSseFrame(frame: string, handlers: QueryStreamHandlers): void {
       handlers.onCitations?.(
         raw.citations as ResolvedCitation[],
         (raw.warnings as string[]) ?? [],
+        (raw.trace as QueryTrace) ?? {},
       );
       break;
     case "error":
