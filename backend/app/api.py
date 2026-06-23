@@ -15,8 +15,8 @@ from sse_starlette.sse import EventSourceResponse
 
 import app.db as app_db
 from app.chunking.orchestrator import chunk_repo
-from app.citations import build_messages, parse, resolve
-from app.citations.context import CitationContext
+from app.citations import build_historical_why_messages, build_messages, parse, resolve
+from app.classifier import get_classifier
 from app.config import get_settings
 from app.db import get_session
 from app.embeddings import get_embedder
@@ -26,6 +26,7 @@ from app.history import ingest_history, select_history_counts
 from app.ingest import MAX_FILE_COUNT, FileCountExceededError, clone_repo, ingest_repo
 from app.llm import get_llm_provider
 from app.models import CodeChunk, Commit, EntityEmbedding, File, Issue, PullRequest, Repo
+from app.retrieval import retrieve_entities
 from app.schemas import (
     ChunkOut,
     ChunkSummary,
@@ -473,13 +474,35 @@ def _sse(event: str, payload: dict) -> dict:
     return {"event": event, "data": json.dumps(payload)}
 
 
+_OUT_OF_SCOPE_ANSWER = (
+    "I don't see anything in this repo's code or history that relates to your "
+    "question. Try rephrasing it to point at a specific file, function, or "
+    "concept in the repository."
+)
+
+
+def _ctx_to_sources_payload(ctx) -> dict:
+    """Typed dict for the SSE 'sources' event. Frontend (5h) renders each
+    list with its own panel + icon; per-type lists keep the wire shape
+    self-describing without a flat polymorphic union.
+    """
+    return {
+        "chunks": [c.model_dump(mode="json") for c in ctx.chunks],
+        "commits": [m.model_dump(mode="json") for m in ctx.commits],
+        "prs": [p.model_dump(mode="json") for p in ctx.prs],
+        "issues": [i.model_dump(mode="json") for i in ctx.issues],
+    }
+
+
 @router.post(
     "/query",
     description=(
-        "Ask a question about the repo. Retrieves top-k chunks, streams a cited "
-        "answer from the configured LLM (SSE), then emits resolved citations. "
-        "Citation ids (`[chunk:c1]`) are validated mechanically against the "
-        "retrieved set — see ADR 0010."
+        "Ask a question about the repo. The classifier routes the query to "
+        "either flat (Slice 4) or multi-hop (Slice 5f) retrieval, the LLM "
+        "streams a cited answer, and resolved typed citations + a debug "
+        "trace are emitted at the end. Citation ids "
+        "(`[chunk:c1]`/`[commit:m1]`/`[pr:p1]`/`[issue:i1]`) are validated "
+        "mechanically against the retrieved set -- see ADR 0010 + 0012."
     ),
 )
 async def query(req: QueryRequest, session: SessionDep):
@@ -487,15 +510,65 @@ async def query(req: QueryRequest, session: SessionDep):
     if repo is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"repo id={req.repo_id} not found")
 
-    # All DB access happens here, before streaming begins; the SSE generator
-    # below is pure in-memory work (LLM stream + citation parsing), so it never
-    # touches the request-scoped session after the response starts.
-    results = await retrieve_chunks(session, req.repo_id, req.question, req.top_k)
-    ctx = CitationContext.from_results(results)
-    messages = build_messages(repo.owner, repo.name, req.question, ctx)
+    # Stage 0: classify (or use the override).
+    if req.classification_override:
+        category = req.classification_override
+        classifier_meta = {"method": "override", "confidence": 1.0, "fallback_used": False}
+    else:
+        result = await get_classifier().classify(req.question)
+        category = result.category
+        classifier_meta = {
+            "method": result.method,
+            "confidence": result.confidence,
+            "fallback_used": result.fallback_used,
+        }
+
+    # Stages 1-4: retrieve (flat for most categories, multi-hop for
+    # historical_why). All DB access happens here, before streaming begins;
+    # the SSE generator below is pure in-memory work.
+    ctx, retrieval_trace = await retrieve_entities(
+        session,
+        repo.id,
+        req.question,
+        top_k=req.top_k,
+        category=category,  # type: ignore[arg-type]  -- override may be any str
+        retrieve_chunks_fn=retrieve_chunks,
+    )
+    trace = {"classifier": classifier_meta, **retrieval_trace}
+
     provider = get_llm_provider()
     owner, name = repo.owner, repo.name
     ref = repo.commit_sha or repo.default_branch  # SHA-pinned when available (§9.4)
+
+    # Out-of-scope: short-circuit -- no LLM call, canned response.
+    if category == "out_of_scope":
+        canned = _OUT_OF_SCOPE_ANSWER
+        if not req.stream:
+            return QueryResponse(
+                repo_id=req.repo_id,
+                question=req.question,
+                category=category,
+                answer=canned,
+                citations=[],
+                warnings=[],
+                chunks=ctx.chunks,
+                trace=trace,
+            )
+
+        async def oos_event_gen() -> AsyncIterator[dict]:
+            yield _sse("sources", _ctx_to_sources_payload(ctx))
+            yield _sse("token", {"text": canned})
+            yield _sse("citations", {"citations": [], "warnings": [], "trace": trace})
+            yield _sse("done", {})
+
+        return EventSourceResponse(oos_event_gen(), headers={"X-Accel-Buffering": "no"})
+
+    # Build typed messages: historical_why uses the chain-tracing prompt; the
+    # other categories use the Slice 4 flat prompt.
+    if category == "historical_why":
+        messages = build_historical_why_messages(owner, name, req.question, ctx)
+    else:
+        messages = build_messages(owner, name, req.question, ctx)
 
     if not req.stream:
         gen = await provider.generate(messages)
@@ -504,16 +577,21 @@ async def query(req: QueryRequest, session: SessionDep):
         return QueryResponse(
             repo_id=req.repo_id,
             question=req.question,
+            category=category,
             answer=gen.text,
             citations=resolved,
             warnings=warnings,
-            sources=ctx.chunks,
+            chunks=ctx.chunks,
+            commits=ctx.commits,
+            prs=ctx.prs,
+            issues=ctx.issues,
+            trace=trace,
         )
 
     async def event_gen() -> AsyncIterator[dict]:
-        # All retrieved chunks up front: powers the Sources panel and supplies
-        # the chunk bodies the UI shows when a citation is expanded.
-        yield _sse("sources", {"sources": [c.model_dump() for c in ctx.chunks]})
+        # All retrieved entities up front: typed dict so the frontend renders
+        # per-type panels for chunks / commits / PRs / issues (Slice 5h).
+        yield _sse("sources", _ctx_to_sources_payload(ctx))
 
         parts: list[str] = []
         try:
@@ -534,7 +612,11 @@ async def query(req: QueryRequest, session: SessionDep):
         resolved = resolve(cites, ctx, owner=owner, name=name, ref=ref)
         yield _sse(
             "citations",
-            {"citations": [r.model_dump() for r in resolved], "warnings": warnings},
+            {
+                "citations": [r.model_dump(mode="json") for r in resolved],
+                "warnings": warnings,
+                "trace": trace,
+            },
         )
         yield _sse("done", {})
 

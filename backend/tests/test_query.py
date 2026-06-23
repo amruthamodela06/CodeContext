@@ -92,10 +92,13 @@ async def test_query_streams_tokens_and_resolves_citations(
     assert "citations" in kinds
     assert kinds[-1] == "done"
 
-    # Sources expose the retrieved chunks (the fixture yields 2 Python chunks).
-    sources = dict(events)["sources"]["sources"]
-    assert {s["display_id"] for s in sources} == {"c1", "c2"}
-    assert all("content" in s for s in sources)
+    # Sources event is now typed: per-type lists (chunks / commits / prs / issues).
+    # The fixture yields 2 Python chunks; no history is seeded, so the other
+    # lists are empty.
+    sources = dict(events)["sources"]
+    assert {s["display_id"] for s in sources["chunks"]} == {"c1", "c2"}
+    assert all("content" in s for s in sources["chunks"])
+    assert sources["commits"] == [] and sources["prs"] == [] and sources["issues"] == []
 
     # Streamed tokens reconstruct the mock answer.
     answer = "".join(d["text"] for e, d in events if e == "token")
@@ -127,9 +130,61 @@ async def test_query_non_streaming_fallback(
     statuses = {c["display_id"]: c["status"] for c in body["citations"]}
     assert statuses["c1"] == "valid"
     assert statuses["c99"] == "invalid"
-    assert len(body["sources"]) == 2
+    assert len(body["chunks"]) == 2
+    # Slice 5g: classifier output surfaced in the response.
+    assert body["category"] in {"lookup", "architectural", "historical_why", "impact"}
+    assert "classifier" in body["trace"]
 
 
 async def test_query_unknown_repo_404(client: AsyncClient) -> None:
     r = await client.post("/query", json={"repo_id": 999999, "question": "hi"})
     assert r.status_code == 404
+
+
+async def test_query_out_of_scope_short_circuits(
+    client: AsyncClient, sample_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """classification_override='out_of_scope' must skip the LLM entirely and
+    return the canned response with category surfaced in the trace."""
+    repo = await _ingest_and_embed(client, sample_repo, monkeypatch)
+    r = await client.post(
+        "/query",
+        json={
+            "repo_id": repo["id"],
+            "question": "What's the best pasta recipe?",
+            "stream": False,
+            "classification_override": "out_of_scope",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["category"] == "out_of_scope"
+    assert "don't see anything in this repo" in body["answer"]
+    assert body["citations"] == []
+    assert body["chunks"] == []  # no retrieval ran
+    assert body["trace"]["classifier"]["method"] == "override"
+
+
+async def test_query_classification_override_routes_to_historical_why(
+    client: AsyncClient, sample_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """classification_override='historical_why' triggers multi-hop expansion
+    even on a question the keyword classifier would route elsewhere. With no
+    history seeded, the expansion produces zero candidates and the chunks-only
+    path takes over -- but the category + trace must still reflect the choice."""
+    repo = await _ingest_and_embed(client, sample_repo, monkeypatch)
+    r = await client.post(
+        "/query",
+        json={
+            "repo_id": repo["id"],
+            "question": "Find the syncify function",  # would normally classify as lookup
+            "stream": False,
+            "classification_override": "historical_why",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["category"] == "historical_why"
+    assert body["trace"]["classifier"]["method"] == "override"
+    # Multi-hop was attempted -- seed_chunk_ids populated by retrieve_entities.
+    assert "seed_chunk_ids" in body["trace"]

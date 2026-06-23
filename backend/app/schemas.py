@@ -3,7 +3,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.citations.context import CitedChunk
+from app.citations.context import CitedChunk, CitedCommit, CitedIssue, CitedPR
 from app.citations.validator import ResolvedCitation
 
 # --- Ingest -------------------------------------------------------------
@@ -127,15 +127,6 @@ class EmbeddingStatusResponse(BaseModel):
     prs_embedded: int = 0
     issues_total: int = 0
     issues_embedded: int = 0
-    # Per-type counts (Slice 5d: orchestrator now embeds all 4 entity types
-    # into entity_embedding). Non-chunk counts will be 0 until /ingest-history
-    # has populated commit/PR/issue rows.
-    commits_total: int = 0
-    commits_embedded: int = 0
-    prs_total: int = 0
-    prs_embedded: int = 0
-    issues_total: int = 0
-    issues_embedded: int = 0
 
 
 # --- History ingestion (Slice 5b, ADR 0011) -----------------------------
@@ -213,16 +204,32 @@ class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1)
     top_k: int = Field(default=5, ge=1, le=50)
     stream: bool = True
+    # Slice 5g: bypass the classifier for testing / debugging. Accepts any
+    # Category literal value; an unknown string falls through to the default
+    # classifier behavior.
+    classification_override: str | None = None
 
 
 class QueryResponse(BaseModel):
     """Non-streaming fallback shape (stream=false). The streaming path emits the
     same data across SSE `sources` / `citations` events instead.
+
+    Slice 5g widens this to surface the classified category, the multi-hop
+    debug trace, and per-type source lists. The Slice-4 single `sources`
+    field is renamed to `chunks` (commits/PRs/issues live in their own lists).
     """
 
     repo_id: int
     question: str
+    # Classifier output: lookup / architectural / historical_why / impact / out_of_scope.
+    category: str
     answer: str
     citations: list[ResolvedCitation]
     warnings: list[str]
-    sources: list[CitedChunk]
+    chunks: list[CitedChunk]
+    commits: list[CitedCommit] = []
+    prs: list[CitedPR] = []
+    issues: list[CitedIssue] = []
+    # Debug payload from retrieve_entities: classifier method/confidence,
+    # multi-hop expansion counts. Surfaced behind a UI toggle (Slice 5h).
+    trace: dict = {}
