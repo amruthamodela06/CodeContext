@@ -1,7 +1,7 @@
 # CodeContext — Roadmap
 
 **Author:** Amrutha
-**Last updated:** May 2026
+**Last updated:** June 2026 (Slice 5 complete — multi-hop graph retrieval)
 **Companion document to:** `docs/PRD.md` (v1)
 
 This document captures everything *not* in v1 — what's coming next, what's speculative, and what we've explicitly decided not to do. It exists so that the v1 PRD can stay focused on v1, and so that scope creep into v1 can be redirected here without the idea being lost.

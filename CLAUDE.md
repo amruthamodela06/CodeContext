@@ -9,7 +9,7 @@ This is a portfolio project. **Rigor and quality matter more than feature count.
 ## Status
 
 - **Phase**: v1 development
-- **Current slice**: Slice 4 complete — LLM answers with mechanically-verified citations, streamed end-to-end (`POST /query` SSE; `LLMProvider` abstraction with Gemini default + Ollama offline; `[chunk:cN]` parse/validate/resolve; commit-SHA-pinned permalinks). Slices 1–3 (ingest, AST chunking, embeddings + vector search) done. Slice 5 next = hybrid retrieval (BM25 + vector, RRF) + reranker. See ADR 0010.
+- **Current slice**: Slice 5 complete — multi-hop graph retrieval over commits / PRs / issues with typed citations. `historical_why` queries route through `chunk → commit → pr` expansion + embedding rerank; the LLM cites typed entities (`[chunk:cN]` / `[commit:mN]` / `[pr:pN]` / `[issue:iN]`) and the frontend renders them as per-type chips with per-type viewers + SHA-pinned permalinks. New surface: `POST /ingest-history` (GraphQL, resumable), `POST /build-graph` (blame + edges), polymorphic `entity_embedding` table (commits/PRs/issues alongside chunks), `QueryClassifier` (keyword default + LLM opt-in). Slices 1–4 still good. Slice 6 next = hybrid retrieval (BM25 + vector, RRF) + cross-encoder reranker. See ADRs 0011 / 0012 / 0013.
 - **Flagship eval repo**: FastAPI (`tiangolo/fastapi`)
 
 ---

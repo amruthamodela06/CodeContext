@@ -6,7 +6,7 @@ This is a v1 portfolio project under active development. See [docs/PRD.md](docs/
 
 ## Status
 
-Naive RAG is end-to-end: ingest → chunk → embed → retrieve → **cited, streaming LLM answer**. Retrieval-quality work (hybrid + rerank) is next.
+Multi-hop retrieval works end-to-end: a `historical_why` question routes through the typed graph (chunk → commit → PR → issue) and the LLM cites every step with a clickable typed chip.
 
 | Slice | What it added | State |
 |---|---|---|
@@ -14,11 +14,12 @@ Naive RAG is end-to-end: ingest → chunk → embed → retrieve → **cited, st
 | 2 | AST chunking (tree-sitter, Python) | ✅ done |
 | 3 | Embeddings + naive vector search | ✅ done |
 | 4 | LLM answers with mechanically-verified citations (streaming) | ✅ done |
-| 5 | Hybrid retrieval (BM25 + vector, RRF) + reranker | ⏳ next |
+| 5 | Multi-hop graph retrieval + typed citations (commits / PRs / issues) | ✅ done |
+| 6 | Hybrid retrieval (BM25 + vector, RRF) + cross-encoder reranker | ⏳ next |
 
-**What works today**: paste a public GitHub URL → it shallow-clones, walks + filters files, AST-chunks the Python ones, embeds each chunk locally on CPU (`bge-small-en-v1.5`), stores vectors in pgvector, then **answers natural-language questions with a streaming LLM response grounded in the retrieved code**. Every factual claim carries a `[chunk:cN]` citation that's mechanically verified against the retrieved set and resolved to a commit-SHA-pinned GitHub permalink; a Sources panel shows everything that was retrieved. Raw semantic search is still available too.
+**What works today**: ingest a public GitHub repo → AST-chunk + embed → ingest 12 months of commits / PRs / issues via GraphQL → build the `chunk → commit → pr → issue` graph via blame + PR-body parsing → ask a question. The classifier (keyword default, LLM opt-in) routes the query; `historical_why` triggers multi-hop expansion + embedding rerank; the LLM streams an answer with typed citation chips (`[chunk:cN]` / `[commit:mN]` / `[pr:pN]` / `[issue:iN]`), each clickable to a per-type viewer with an "Open on GitHub" link.
 
-Demonstrated on `tiangolo/asyncer`: 100 files → 132 chunks → asking *"how do I run an async function from synchronous code?"* returns a cited answer pointing at `syncify` / `runnify`, each citation clickable to the exact lines on GitHub.
+Demonstrated on `tiangolo/asyncer`: 100 files + 132 chunks + 460 commits + 287 PRs + 1 issue ingested. Asking *"why was syncify added?"* routes to `historical_why` (keyword classifier, 90% confidence), expands the seed chunks via the graph, reranks to 3 commits, and produces a cited answer like *"`syncify` was added to allow synchronous execution of asynchronous functions … This feature was introduced in `[commit:m1]` and further expanded with tests and documentation in `[commit:m2]` and `[commit:m3]`. The initial implementation of `syncify` was done in `[chunk:c1]`."* — with `commit:m1` resolved to `/commit/6a713b0…` (a 2022 commit stub-inserted by blame, four years outside the GraphQL window) and `chunk:c1` resolved to the SHA-pinned blob URL at `asyncer/_main.py:244-312`.
 
 ## Quick start
 
@@ -71,13 +72,17 @@ cd backend && RUN_SLOW=1 uv run pytest -k bge_small   # downloads + runs the rea
 | `POST /repos/{repo_id}/chunk` | Re-chunk a repo (idempotent) |
 | `GET /repos/{repo_id}/chunks` | List chunks (paginated; filter by type / language / file) |
 | `GET /chunks/{chunk_id}` | Fetch one chunk |
-| `POST /repos/{repo_id}/embed` | Embed all chunks (background job; 202) |
-| `GET /repos/{repo_id}/embedding-status` | Poll embedding progress |
+| `POST /repos/{repo_id}/embed` | Embed all entities (chunks + commits + PRs + issues; background job; 202) |
+| `GET /repos/{repo_id}/embedding-status` | Poll embedding progress (per-type counts) |
+| `POST /repos/{repo_id}/ingest-history` | Background: fetch commits / PRs / issues via GraphQL (resumable; requires `GITHUB_TOKEN`) |
+| `GET /repos/{repo_id}/history-ingestion-status` | Poll history ingestion progress |
+| `POST /repos/{repo_id}/build-graph` | Background: per-file blame + PR-body parsing → `entity_edge` rows |
+| `GET /repos/{repo_id}/graph-status` | Poll graph-build progress (per-edge-type counts) |
 | `POST /search` | Naive cosine search → top-k chunks with similarity |
-| `POST /query` | Ask a question → SSE stream of answer tokens + verified citations |
+| `POST /query` | Ask a question → classify → retrieve → SSE stream of answer tokens + typed citations + debug trace |
 | `GET /healthz` | Liveness |
 
-`POST /query` streams Server-Sent Events: `sources` (all retrieved chunks) → `token`×N (answer deltas) → `citations` (resolved + warnings) → `done`, or `error` on mid-stream failure. The browser consumes it with `fetch` + `ReadableStream` (it's a POST, so not `EventSource`).
+`POST /query` streams Server-Sent Events: `sources` (typed dict: chunks / commits / PRs / issues, each carrying its own permalink) → `token`×N (answer deltas) → `citations` (typed `ResolvedCitation`s + warnings + classifier/multi-hop trace) → `done`, or `error` on mid-stream failure. The browser consumes it with `fetch` + `ReadableStream` (it's a POST, so not `EventSource`).
 
 ## Architecture
 
@@ -86,10 +91,13 @@ cd backend && RUN_SLOW=1 uv run pytest -k bge_small   # downloads + runs the rea
 - **Parsing**: tree-sitter (`tree-sitter-language-pack`) — Python implemented; TS/JS/Go/Rust stubbed
 - **Embeddings**: `bge-small-en-v1.5` (384-dim) via `sentence-transformers`, CPU, in-process; behind a swappable `Embedder` interface (`EMBEDDING_PROVIDER` env)
 - **Vector index**: pgvector HNSW (cosine), built after bulk insert
-- **LLM**: Gemini 2.0 Flash (free tier) by default / Ollama Qwen 2.5 Coder 3B offline, behind a swappable `LLMProvider` interface (`LLM_PROVIDER` env); one OpenAI-SDK transport for both (ADR 0007)
-- **Citations**: per-query `[chunk:cN]` IDs, parsed (code-fence-aware, shape-only) and validated against the retrieved set, resolved to commit-SHA-pinned permalinks (ADR 0010)
-- **Frontend**: Next.js 16 (App Router), React 19, TypeScript strict, Tailwind 4; Monaco for cited-chunk rendering
-- **Eval**: pytest-based harness in `eval/` (later slice)
+- **LLM**: Gemini 2.0 Flash (free tier) by default / Ollama Qwen 2.5 Coder 3B/7B offline, behind a swappable `LLMProvider` interface (`LLM_PROVIDER` env); one OpenAI-SDK transport for both (ADR 0007)
+- **History**: commits / PRs / issues mirrored via GitHub GraphQL into local tables; per-file `git blame` + PR-body parsing populates a polymorphic `entity_edge` graph (ADR 0011)
+- **Query classifier**: keyword default (sub-ms) or LLM opt-in (`QUERY_CLASSIFIER` env); routes to flat vs. multi-hop retrieval (ADR 0012)
+- **Multi-hop retrieval**: recursive-CTE traversal over `entity_edge` (depth 2 / breadth 10) + embedding rerank of expanded set; only for `historical_why` queries (ADR 0012)
+- **Citations**: typed `[chunk:cN]` / `[commit:mN]` / `[pr:pN]` / `[issue:iN]`, parsed (code-fence-aware, shape-only), validated against the retrieved set, resolved to per-type permalinks (ADR 0010 + 0012)
+- **Frontend**: Next.js 16 (App Router), React 19, TypeScript strict, Tailwind 4; Monaco for cited-chunk rendering; per-type Sources panels + chip viewers
+- **Eval**: pytest-based harness in `eval/` (Slice 7)
 
 All ML runs on CPU — no GPU assumed (see [ADR 0007](docs/decisions/0007-oss-embeddings-llm-provider-abstraction.md)). The default path uses free/local providers; paid APIs are for ablation only.
 
@@ -99,7 +107,7 @@ All ML runs on CPU — no GPU assumed (see [ADR 0007](docs/decisions/0007-oss-em
 backend/    FastAPI app, SQLAlchemy models, Alembic migrations, pytest suite
 frontend/   Next.js App Router UI
 infra/      docker-compose (Postgres + pgvector)
-docs/       PRD, roadmap, and decisions/ (ADRs 0001–0010)
+docs/       PRD, roadmap, and decisions/ (ADRs 0001–0013)
 eval/       evaluation harness (later slice)
 ```
 
