@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from httpx import AsyncClient
 
+import app.db as app_db
 from app import ingest
 
 pytestmark = pytest.mark.usefixtures("_clean_db")
@@ -188,3 +189,280 @@ async def test_query_classification_override_routes_to_historical_why(
     assert body["trace"]["classifier"]["method"] == "override"
     # Multi-hop was attempted -- seed_chunk_ids populated by retrieve_entities.
     assert "seed_chunk_ids" in body["trace"]
+
+
+# --- Slice 5i: full end-to-end /query historical_why pipeline -------------
+
+
+async def _seed_full_graph(repo_id: int) -> dict:
+    """Seed a repo with chunks + commits + PRs + issues + edges + embeddings
+    so the historical_why pipeline can run end-to-end against a known graph.
+
+    Returns the id mapping the test asserts against. Uses the test's
+    SessionLocal (the fixture's session is request-scoped and would close
+    before /query runs its own session).
+    """
+    from datetime import UTC, datetime
+
+    from app.models import (
+        CodeChunk,
+        Commit,
+        EntityEdge,
+        EntityEmbedding,
+        File,
+        Issue,
+        PullRequest,
+        Repo,
+    )
+
+    async with app_db.SessionLocal() as s:
+        repo = await s.get(Repo, repo_id)
+        # SHA-pinned permalinks come from this.
+        repo.commit_sha = "abcdef0" + "0" * 33
+        await s.commit()
+
+        from sqlalchemy import select
+
+        file = (await s.execute(select(File).where(File.repo_id == repo_id).limit(1))).scalar_one()
+        chunk_ids = [
+            c.id
+            for c in (await s.execute(select(CodeChunk).where(CodeChunk.repo_id == repo_id)))
+            .scalars()
+            .all()
+        ]
+
+        # Seed a commit, PR, issue + edges + embeddings.
+        commit = Commit(
+            repo_id=repo_id,
+            sha="c" * 40,
+            author_name="Jane",
+            authored_at=datetime.now(UTC),
+            message="Add syncify helper",
+        )
+        pr = PullRequest(
+            repo_id=repo_id,
+            number=234,
+            title="Add syncify",
+            body="Implements syncify per #189",
+            state="merged",
+            created_at=datetime.now(UTC),
+            merged_at=datetime.now(UTC),
+            merge_commit_sha="c" * 40,
+        )
+        issue = Issue(
+            repo_id=repo_id,
+            number=189,
+            title="Need sync wrapper",
+            body="We need a way to call async from sync.",
+            state="closed",
+            created_at=datetime.now(UTC),
+        )
+        s.add_all([commit, pr, issue])
+        await s.commit()
+
+        # Graph: chunks -> commit -> PR -> issue.
+        edges = [
+            EntityEdge(
+                repo_id=repo_id,
+                source_type="chunk",
+                source_id=chunk_ids[0],
+                target_type="commit",
+                target_id=commit.id,
+                edge_type="introduced_by",
+            ),
+            EntityEdge(
+                repo_id=repo_id,
+                source_type="commit",
+                source_id=commit.id,
+                target_type="pr",
+                target_id=pr.id,
+                edge_type="part_of",
+            ),
+            EntityEdge(
+                repo_id=repo_id,
+                source_type="pr",
+                source_id=pr.id,
+                target_type="issue",
+                target_id=issue.id,
+                edge_type="references_issue",
+            ),
+        ]
+        s.add_all(edges)
+        await s.commit()
+
+        # Embeddings on every non-chunk entity so the reranker has something
+        # to score. Chunks were embedded by _ingest_and_embed already.
+        unit = [1.0] + [0.0] * 383
+        s.add_all(
+            [
+                EntityEmbedding(
+                    repo_id=repo_id,
+                    entity_type="commit",
+                    entity_id=commit.id,
+                    embedding=unit,
+                    model_name="fake-embedder",
+                    dimension=384,
+                ),
+                EntityEmbedding(
+                    repo_id=repo_id,
+                    entity_type="pr",
+                    entity_id=pr.id,
+                    embedding=unit,
+                    model_name="fake-embedder",
+                    dimension=384,
+                ),
+                EntityEmbedding(
+                    repo_id=repo_id,
+                    entity_type="issue",
+                    entity_id=issue.id,
+                    embedding=unit,
+                    model_name="fake-embedder",
+                    dimension=384,
+                ),
+            ]
+        )
+        await s.commit()
+        return {
+            "repo": repo_id,
+            "file": file.id,
+            "chunk_ids": chunk_ids,
+            "commit": commit.id,
+            "commit_sha": commit.sha,
+            "pr": pr.id,
+            "pr_number": pr.number,
+            "issue": issue.id,
+            "issue_number": issue.number,
+        }
+
+
+class _CustomAnswerProvider:
+    """LLMProvider stub that returns a fixed answer text. Used to drive
+    /query with a known answer string carrying all four typed citation
+    types, so the parse + validate + resolve chain can be asserted on."""
+
+    def __init__(self, answer: str) -> None:
+        self._answer = answer
+
+    @property
+    def name(self) -> str:
+        return "stub-custom-answer"
+
+    async def generate(self, messages, **opts):
+        from app.llm.protocol import GenResult
+
+        return GenResult(text=self._answer)
+
+    async def generate_stream(self, messages, **opts):
+        # Yield in two chunks so the streaming-accumulation path is exercised.
+        mid = len(self._answer) // 2
+        yield self._answer[:mid]
+        yield self._answer[mid:]
+
+
+async def test_query_historical_why_full_pipeline(
+    client: AsyncClient, sample_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The big end-to-end: ingest -> embed -> seed graph + per-type embeddings
+    + historical_why override -> stub LLM returns an answer citing all four
+    typed entities. Assert the entire pipeline: classifier trace, multi-hop
+    expansion + rerank counts, typed citations validated, per-type
+    permalinks on the SSE sources payload (the bug da3baca fixed)."""
+    repo = await _ingest_and_embed(client, sample_repo, monkeypatch)
+    ids = await _seed_full_graph(repo["id"])
+
+    answer = (
+        "syncify was added to allow sync-from-async calls [chunk:c1]. "
+        "The PR [pr:p1] introduced it, citing [issue:i1] as the motivation. "
+        "The change landed in [commit:m1]. The original issue is also tracked "
+        "but the link [chunk:c99] is malformed."
+    )
+    from app import api as api_mod
+
+    monkeypatch.setattr(api_mod, "get_llm_provider", lambda: _CustomAnswerProvider(answer))
+
+    events = await _collect_sse(
+        client,
+        {
+            "repo_id": repo["id"],
+            "question": "Why was syncify added?",
+            "stream": True,
+            "classification_override": "historical_why",
+        },
+    )
+    by_event = dict(events)
+
+    # --- Sources event: typed dict, every entity carries a permalink (da3baca).
+    # depth=2 reaches chunk -> commit (hop 1) -> pr (hop 2). Issues sit at
+    # hop 3 from a chunk and are NOT in the multi-hop context (ADR 0012);
+    # they'd arrive via flat retrieval or the `closed_by` inverse instead.
+    sources = by_event["sources"]
+    assert {s["display_id"] for s in sources["chunks"]} == {"c1", "c2"}
+    assert [c["display_id"] for c in sources["commits"]] == ["m1"]
+    assert [p["display_id"] for p in sources["prs"]] == ["p1"]
+    assert sources["issues"] == []  # depth=2 doesn't reach hop 3
+
+    # Permalinks are present and well-formed per type.
+    assert "/blob/" in sources["chunks"][0]["permalink"]
+    assert (
+        sources["commits"][0]["permalink"]
+        == f"https://github.com/test/fixture/commit/{ids['commit_sha']}"
+    )
+    assert (
+        sources["prs"][0]["permalink"] == f"https://github.com/test/fixture/pull/{ids['pr_number']}"
+    )
+
+    # --- Citations event: typed resolution + trace populated.
+    cit_evt = by_event["citations"]
+    by_key = {(c["entity_type"], c["display_id"]): c for c in cit_evt["citations"]}
+    assert by_key[("chunk", "c1")]["status"] == "valid"
+    assert by_key[("commit", "m1")]["status"] == "valid"
+    assert by_key[("commit", "m1")]["commit_sha"] == ids["commit_sha"]
+    assert by_key[("pr", "p1")]["status"] == "valid"
+    assert by_key[("pr", "p1")]["pr_number"] == ids["pr_number"]
+    # i1 was cited by the model but the issue isn't in the depth=2 context
+    # -> validator must flag it invalid (mechanical citation discipline).
+    assert by_key[("issue", "i1")]["status"] == "invalid"
+    assert by_key[("issue", "i1")]["permalink"] is None
+    assert by_key[("chunk", "c99")]["status"] == "invalid"
+
+    trace = cit_evt["trace"]
+    assert trace["classifier"]["method"] == "override"
+    assert trace["category"] == "historical_why"
+    assert trace["expansion_candidates"] >= 1  # the commit (then PR via depth=2)
+    assert trace["reranked_count"] >= 1
+
+
+async def test_query_sources_carry_permalinks_for_uncited_entities(
+    client: AsyncClient, sample_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for da3baca: every retrieved entity in the SSE sources
+    payload must have its own permalink, not just the ones the model cited.
+    Uses a stub LLM that emits NO citations at all so no ResolvedCitation
+    rows are produced; the source permalinks must still be there."""
+    repo = await _ingest_and_embed(client, sample_repo, monkeypatch)
+    ids = await _seed_full_graph(repo["id"])
+
+    from app import api as api_mod
+
+    monkeypatch.setattr(
+        api_mod,
+        "get_llm_provider",
+        lambda: _CustomAnswerProvider("Generic answer, no citations at all."),
+    )
+    events = await _collect_sse(
+        client,
+        {
+            "repo_id": repo["id"],
+            "question": "Why?",
+            "stream": True,
+            "classification_override": "historical_why",
+        },
+    )
+    sources = dict(events)["sources"]
+    # Citations payload is empty -- model wrote no [type:id] tokens.
+    assert dict(events)["citations"]["citations"] == []
+    # ...but every retrieved entity still carries its own permalink.
+    for entity_list in (sources["chunks"], sources["commits"], sources["prs"], sources["issues"]):
+        for e in entity_list:
+            assert e["permalink"], f"missing permalink on {e.get('display_id')}"
+    assert sources["commits"][0]["permalink"].endswith(ids["commit_sha"])
