@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -66,6 +67,8 @@ async def retrieve_entities(
     from app.retrieval import get_retriever
 
     trace: dict = {"category": category}
+    stage_timings: dict[str, float] = {}
+    trace["stage_timings_ms"] = stage_timings
 
     if category == "out_of_scope":
         return CitationContext(), trace
@@ -76,6 +79,7 @@ async def retrieve_entities(
     # Stage 1 -- flat chunk retrieval via the configured retriever. Filter to
     # chunks only; history entities come from Slice 5's multi-hop expansion
     # below, not from flat stage-1.
+    t0 = time.perf_counter()
     flat_results = await r.retrieve(
         session,
         repo_id,
@@ -84,30 +88,37 @@ async def retrieve_entities(
         filters=RetrievalFilters(entity_types={"chunk"}),
     )
     chunks = await _hydrate_chunks(session, flat_results)
+    stage_timings["retrieve"] = round((time.perf_counter() - t0) * 1000, 1)
     trace["seed_chunk_ids"] = [c.chunk_id for c in chunks]
 
     if category != "historical_why" or not chunks:
         return CitationContext(chunks=chunks), trace
 
     # Stage 2 -- graph expansion (chunk -> commit -> pr at depth 2).
+    t0 = time.perf_counter()
     seed_ids = [c.chunk_id for c in chunks]
     expanded = await traverse_outbound(session, repo_id, seed_ids)
+    stage_timings["expand"] = round((time.perf_counter() - t0) * 1000, 1)
     trace["expansion_candidates"] = len(expanded)
     if not expanded:
         return CitationContext(chunks=chunks), trace
 
     # Stage 3 -- embedding rerank the expanded set against the query.
+    t0 = time.perf_counter()
     embedder = get_embedder()
     query_vec = await asyncio.to_thread(embedder.embed_one, query)
     candidate_pairs = [(t, i) for t, i, _ in expanded]
     reranked = await rerank_by_embedding(session, repo_id, candidate_pairs, query_vec, top_k=top_k)
+    stage_timings["multihop_rerank"] = round((time.perf_counter() - t0) * 1000, 1)
     trace["reranked_count"] = len(reranked)
     if not reranked:
         return CitationContext(chunks=chunks), trace
 
     # Stage 4 -- hydrate full entity rows + render relationships.
+    t0 = time.perf_counter()
     commits, prs, issues = await _hydrate_entities(session, repo_id, reranked)
     relations = await _build_relations(session, repo_id, chunks, commits, prs, issues)
+    stage_timings["hydrate"] = round((time.perf_counter() - t0) * 1000, 1)
 
     ctx = CitationContext(
         chunks=chunks,
@@ -167,6 +178,8 @@ async def _hydrate_chunks(
                 name=chunk.name,
                 content=chunk.content,
                 similarity=res.score,
+                # Debug: per-component scores from the retriever (Slice 6i).
+                score_breakdown=dict(res.score_breakdown) if res.score_breakdown else None,
             )
         )
     return out

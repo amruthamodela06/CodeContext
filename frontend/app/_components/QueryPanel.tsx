@@ -655,6 +655,9 @@ function DebugTrace({
   showDebug: boolean;
   onToggle: () => void;
 }) {
+  const stageTimings = trace.stage_timings_ms
+    ? Object.entries(trace.stage_timings_ms)
+    : [];
   return (
     <details
       open={showDebug}
@@ -667,8 +670,28 @@ function DebugTrace({
         }}
         className="cursor-pointer select-none text-gray-500 hover:text-gray-700"
       >
-        Debug trace (classifier + multi-hop expansion)
+        Debug trace (classifier + retrieval + multi-hop)
       </summary>
+      {/* Slice 6i: fast-scan summary above the raw JSON dump so retrieval
+          mode + per-stage timings are visible at a glance. */}
+      {(trace.retrieval_mode || stageTimings.length > 0) && (
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-gray-700">
+          {trace.retrieval_mode && (
+            <span>
+              retrieval:{" "}
+              <span className="font-mono font-semibold">
+                {trace.retrieval_mode}
+              </span>
+            </span>
+          )}
+          {stageTimings.map(([stage, ms]) => (
+            <span key={stage} className="text-gray-500">
+              {stage}:{" "}
+              <span className="font-mono text-gray-700">{ms.toFixed(1)} ms</span>
+            </span>
+          ))}
+        </div>
+      )}
       <pre className="mt-2 overflow-x-auto rounded bg-gray-50 p-2 font-mono text-xs leading-relaxed text-gray-700">
         {JSON.stringify(trace, null, 2)}
       </pre>

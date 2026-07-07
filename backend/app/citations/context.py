@@ -36,6 +36,10 @@ class CitedChunk(BaseModel):
     name: str | None
     content: str
     similarity: float
+    # Slice 6i: per-component scores from the retriever (vector_rank,
+    # bm25_rank, rrf_score, rerank_score, ...). None for entities from
+    # the Slice 5 multi-hop path (embedding-only rerank, no breakdown).
+    score_breakdown: dict[str, float] | None = None
 
 
 class CitedCommit(BaseModel):
@@ -47,6 +51,7 @@ class CitedCommit(BaseModel):
     authored_at: datetime | None
     message: str
     similarity: float = 0.0  # filled by reranker for multi-hop
+    score_breakdown: dict[str, float] | None = None
 
 
 class CitedPR(BaseModel):
@@ -59,6 +64,7 @@ class CitedPR(BaseModel):
     state: str
     merged_at: datetime | None
     similarity: float = 0.0
+    score_breakdown: dict[str, float] | None = None
 
 
 class CitedIssue(BaseModel):
@@ -71,6 +77,7 @@ class CitedIssue(BaseModel):
     state: str
     closed_at: datetime | None
     similarity: float = 0.0
+    score_breakdown: dict[str, float] | None = None
 
 
 # Discriminated-union alias for typing convenience.

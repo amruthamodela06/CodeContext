@@ -174,6 +174,10 @@ export type CitedChunkItem = {
   // entity (not just cited ones) so Sources-panel rows always have an
   // Open-on-GitHub link.
   permalink?: string;
+  // Slice 6i: per-component scores from the retriever (vector_rank,
+  // bm25_rank, rrf_score, rerank_score...). Null for entities that came
+  // in via Slice 5 multi-hop, since that path uses embedding-only rerank.
+  score_breakdown?: Record<string, number> | null;
 };
 
 export type CitationStatus = "valid" | "none" | "invalid";
@@ -191,6 +195,7 @@ export type CitedCommitItem = {
   message: string;
   similarity: number;
   permalink?: string;
+  score_breakdown?: Record<string, number> | null;
 };
 
 export type CitedPRItem = {
@@ -204,6 +209,7 @@ export type CitedPRItem = {
   merged_at: string | null;
   similarity: number;
   permalink?: string;
+  score_breakdown?: Record<string, number> | null;
 };
 
 export type CitedIssueItem = {
@@ -217,6 +223,7 @@ export type CitedIssueItem = {
   closed_at: string | null;
   similarity: number;
   permalink?: string;
+  score_breakdown?: Record<string, number> | null;
 };
 
 export type TypedSources = {
@@ -227,6 +234,8 @@ export type TypedSources = {
 };
 
 // Slice 5g: trace payload carrying classifier + multi-hop debug info.
+// Slice 6i: `retrieval_mode` (which retriever ran) + `stage_timings_ms`
+// (per-stage wall clock -- retrieve / expand / multihop_rerank / hydrate).
 export type QueryTrace = {
   classifier?: {
     method: string;
@@ -234,6 +243,8 @@ export type QueryTrace = {
     fallback_used: boolean;
   };
   category?: string;
+  retrieval_mode?: string;
+  stage_timings_ms?: Record<string, number>;
   seed_chunk_ids?: number[];
   expansion_candidates?: number;
   reranked_count?: number;
