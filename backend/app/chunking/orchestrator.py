@@ -19,6 +19,7 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chunking import chunker_for
+from app.fts import compute_chunk_fts
 from app.models import CodeChunk, Repo
 
 log = logging.getLogger(__name__)
@@ -59,6 +60,12 @@ async def chunk_repo(repo: Repo, repo_root: Path, session: AsyncSession) -> int:
             continue
 
         for chunk in chunks:
+            fts_name, fts_doc, fts_body = compute_chunk_fts(
+                name=chunk.name,
+                parent_name=chunk.parent_name,
+                content=chunk.content,
+                language=chunk.language,
+            )
             session.add(
                 CodeChunk(
                     repo_id=repo.id,
@@ -72,6 +79,9 @@ async def chunk_repo(repo: Repo, repo_root: Path, session: AsyncSession) -> int:
                     language=chunk.language,
                     is_async=chunk.is_async,
                     extra_metadata=chunk.extra_metadata,
+                    fts_name=fts_name,
+                    fts_doc=fts_doc,
+                    fts_body=fts_body,
                 )
             )
         total += len(chunks)
