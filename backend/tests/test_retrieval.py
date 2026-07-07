@@ -18,7 +18,12 @@ from app.models import (
     PullRequest,
     Repo,
 )
-from app.retrieval import BM25Retriever, RetrievalFilters, VectorRetriever
+from app.retrieval import (
+    BM25Retriever,
+    HybridRetriever,
+    RetrievalFilters,
+    VectorRetriever,
+)
 
 pytestmark = pytest.mark.usefixtures("_clean_db")
 
@@ -369,3 +374,127 @@ async def test_bm25_retriever_scopes_to_repo(session: AsyncSession) -> None:
     ids_seen = {(res.entity_type, res.entity_id) for res in results_a}
     # Every hit belongs to repo A.
     assert ids_seen == {("chunk", ids_a["chunk"]), ("pr", ids_a["pr"])}
+
+
+# --- HybridRetriever ------------------------------------------------------
+
+
+async def _seed_hybrid_repo(session: AsyncSession, *, owner: str = "o", name: str = "hyb") -> dict:
+    """Seed a repo with BOTH populated FTS content AND embeddings on all
+    four entity types, so HybridRetriever can exercise vector + BM25 in
+    parallel. Uses the BM25 fixture text + the polymorphic unit vectors.
+    """
+    from datetime import UTC, datetime
+
+    ids = await _seed_bm25_repo(session, owner=owner, name=name)
+
+    # Layer embeddings on top. Vectors are chosen so a query aligned with
+    # vec_chunk ranks chunk#1 in vector, and the BM25 half handles syncify
+    # match separately.
+    vec_chunk = [1.0] + [0.0] * 383
+    vec_commit = [0.0, 1.0] + [0.0] * 382
+    vec_pr = [0.0, 0.0, 1.0] + [0.0] * 381
+    vec_issue = [0.0, 0.0, 0.0, 1.0] + [0.0] * 380
+    session.add_all(
+        [
+            EntityEmbedding(
+                repo_id=ids["repo"],
+                entity_type="chunk",
+                entity_id=ids["chunk"],
+                embedding=vec_chunk,
+                model_name="fake-embedder",
+                dimension=384,
+            ),
+            EntityEmbedding(
+                repo_id=ids["repo"],
+                entity_type="commit",
+                entity_id=ids["commit"],
+                embedding=vec_commit,
+                model_name="fake-embedder",
+                dimension=384,
+            ),
+            EntityEmbedding(
+                repo_id=ids["repo"],
+                entity_type="pr",
+                entity_id=ids["pr"],
+                embedding=vec_pr,
+                model_name="fake-embedder",
+                dimension=384,
+            ),
+            EntityEmbedding(
+                repo_id=ids["repo"],
+                entity_type="issue",
+                entity_id=ids["issue"],
+                embedding=vec_issue,
+                model_name="fake-embedder",
+                dimension=384,
+            ),
+        ]
+    )
+    await session.commit()
+    # Suppress unused-import warning; datetime is imported implicitly by helper.
+    _ = datetime, UTC
+    return ids
+
+
+async def test_hybrid_retriever_fuses_vector_and_bm25(session: AsyncSession) -> None:
+    """A syncify query returns entities matched by BM25 (chunk + PR) and
+    also entities pulled in by vector rerank of the four embeddings. The
+    fused list carries per-retriever ranks in score_breakdown."""
+    ids = await _seed_hybrid_repo(session)
+    r = HybridRetriever()
+    results = await r.retrieve(session, ids["repo"], "syncify", top_k=10)
+
+    # BM25 matches produced chunk + pr for 'syncify'. Vector produced all
+    # four entities. Fusion must include everything vector saw at least.
+    types_seen = {(res.entity_type, res.entity_id) for res in results}
+    assert ("chunk", ids["chunk"]) in types_seen
+    assert ("pr", ids["pr"]) in types_seen
+    # score_breakdown surfaces which ranker contributed.
+    top_breakdown = results[0].score_breakdown
+    assert "rrf_score" in top_breakdown
+    # At least one of vector_rank / bm25_rank must be present on the top hit.
+    assert "vector_rank" in top_breakdown or "bm25_rank" in top_breakdown
+
+
+async def test_hybrid_retriever_scores_descending(session: AsyncSession) -> None:
+    ids = await _seed_hybrid_repo(session)
+    r = HybridRetriever()
+    results = await r.retrieve(session, ids["repo"], "syncify", top_k=10)
+    scores = [res.score for res in results]
+    assert scores == sorted(scores, reverse=True)
+
+
+async def test_hybrid_retriever_passes_filters_through(session: AsyncSession) -> None:
+    """entity_types filter must apply to BOTH underlying retrievers."""
+    ids = await _seed_hybrid_repo(session)
+    r = HybridRetriever()
+    results = await r.retrieve(
+        session,
+        ids["repo"],
+        "syncify",
+        top_k=10,
+        filters=RetrievalFilters(entity_types={"chunk"}),
+    )
+    assert {res.entity_type for res in results} == {"chunk"}
+
+
+async def test_hybrid_retriever_top_k_bounds_after_fusion(session: AsyncSession) -> None:
+    """candidate_n=50 per retriever, but top_k=1 must trim to one final row."""
+    ids = await _seed_hybrid_repo(session)
+    r = HybridRetriever(candidate_n=10, rrf_k=60)
+    results = await r.retrieve(session, ids["repo"], "syncify", top_k=1)
+    assert len(results) == 1
+
+
+async def test_hybrid_retriever_tunable_rrf_k(session: AsyncSession) -> None:
+    """Larger rrf_k compresses the score gap. Ordering is stable, scores shift."""
+    ids = await _seed_hybrid_repo(session)
+    small_k = await HybridRetriever(rrf_k=60).retrieve(session, ids["repo"], "syncify", top_k=10)
+    large_k = await HybridRetriever(rrf_k=6000).retrieve(session, ids["repo"], "syncify", top_k=10)
+    # Same rows in same order (ties broken deterministically by dict insertion).
+    assert [(r.entity_type, r.entity_id) for r in small_k] == [
+        (r.entity_type, r.entity_id) for r in large_k
+    ]
+    # Scores are strictly smaller under the larger k.
+    assert small_k[0].score > large_k[0].score

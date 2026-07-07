@@ -8,6 +8,7 @@ in 6h.
 """
 
 from app.retrieval.bm25 import BM25Retriever
+from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.orchestrator import retrieve_entities
 from app.retrieval.protocol import (
     EntityType,
@@ -15,14 +16,17 @@ from app.retrieval.protocol import (
     RetrievalResult,
     Retriever,
 )
+from app.retrieval.rrf import reciprocal_rank_fusion
 from app.retrieval.vector import VectorRetriever
 
 __all__ = [
     "BM25Retriever",
     "EntityType",
+    "HybridRetriever",
     "RetrievalFilters",
     "RetrievalResult",
     "Retriever",
     "VectorRetriever",
+    "reciprocal_rank_fusion",
     "retrieve_entities",
 ]
