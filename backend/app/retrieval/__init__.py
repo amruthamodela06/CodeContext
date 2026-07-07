@@ -14,11 +14,13 @@ from app.retrieval.protocol import (
     RetrievalResult,
     Retriever,
 )
+from app.retrieval.vector import VectorRetriever
 
 __all__ = [
     "EntityType",
     "RetrievalFilters",
     "RetrievalResult",
     "Retriever",
+    "VectorRetriever",
     "retrieve_entities",
 ]
