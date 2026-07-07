@@ -7,6 +7,7 @@ The concrete Retrievers arrive in 6d-6g and are wired via the factory
 in 6h.
 """
 
+from app.retrieval.bm25 import BM25Retriever
 from app.retrieval.orchestrator import retrieve_entities
 from app.retrieval.protocol import (
     EntityType,
@@ -17,6 +18,7 @@ from app.retrieval.protocol import (
 from app.retrieval.vector import VectorRetriever
 
 __all__ = [
+    "BM25Retriever",
     "EntityType",
     "RetrievalFilters",
     "RetrievalResult",

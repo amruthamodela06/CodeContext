@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.fts import compute_chunk_fts
 from app.models import (
     CodeChunk,
     Commit,
@@ -17,7 +18,7 @@ from app.models import (
     PullRequest,
     Repo,
 )
-from app.retrieval import RetrievalFilters, VectorRetriever
+from app.retrieval import BM25Retriever, RetrievalFilters, VectorRetriever
 
 pytestmark = pytest.mark.usefixtures("_clean_db")
 
@@ -213,3 +214,158 @@ async def test_vector_retriever_scopes_to_repo(session: AsyncSession) -> None:
             assert eid == ids_a["pr"]
         elif et == "issue":
             assert eid == ids_a["issue"]
+
+
+# --- BM25Retriever --------------------------------------------------------
+
+
+async def _seed_bm25_repo(session: AsyncSession, *, owner: str = "o", name: str = "bm25") -> dict:
+    """Seed a repo with one chunk / commit / pr / issue whose text
+    contains distinct English terms so BM25 queries land deterministically.
+
+    - chunk (syncify function): matches queries about 'syncify', 'async', 'sync'.
+    - commit (bcrypt change): matches queries about 'bcrypt', 'password',
+      'hash'.
+    - pr (also syncify): matches 'syncify', 'anyio', 'sync'.
+    - issue (bcrypt gap): matches 'bcrypt', 'passwords', 'plaintext'.
+    """
+    from datetime import UTC, datetime
+
+    repo = Repo(owner=owner, name=name, default_branch="main")
+    session.add(repo)
+    await session.commit()
+
+    f = File(repo_id=repo.id, path="auth.py", size_bytes=10, language="Python")
+    session.add(f)
+    await session.commit()
+
+    chunk_src = (
+        'def syncify(fn):\n    """Run coroutine synchronously via anyio."""\n    return fn\n'
+    )
+    fts_name, fts_doc, fts_body = compute_chunk_fts(
+        name="syncify",
+        parent_name=None,
+        content=chunk_src,
+        language="Python",
+    )
+    chunk = CodeChunk(
+        repo_id=repo.id,
+        file_id=f.id,
+        chunk_type="function",
+        name="syncify",
+        start_line=1,
+        end_line=3,
+        content=chunk_src,
+        language="Python",
+        fts_name=fts_name,
+        fts_doc=fts_doc,
+        fts_body=fts_body,
+    )
+    commit = Commit(
+        repo_id=repo.id,
+        sha="a" * 40,
+        message="Add bcrypt password hashing to auth",
+    )
+    pr = PullRequest(
+        repo_id=repo.id,
+        number=42,
+        title="Add syncify helper",
+        body="Wraps anyio to run async from sync context.",
+        state="merged",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    issue = Issue(
+        repo_id=repo.id,
+        number=100,
+        title="Passwords not hashed",
+        body="We store plaintext -- switch to bcrypt.",
+        state="closed",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    session.add_all([chunk, commit, pr, issue])
+    await session.commit()
+    return {
+        "repo": repo.id,
+        "chunk": chunk.id,
+        "commit": commit.id,
+        "pr": pr.id,
+        "issue": issue.id,
+    }
+
+
+async def test_bm25_retriever_finds_matches_across_types(session: AsyncSession) -> None:
+    """'syncify' should hit both the chunk and the PR that mention it,
+    and NOT the bcrypt commit/issue."""
+    ids = await _seed_bm25_repo(session)
+    r = BM25Retriever()
+    results = await r.retrieve(session, ids["repo"], "syncify", top_k=10)
+    hits = {(res.entity_type, res.entity_id) for res in results}
+    assert ("chunk", ids["chunk"]) in hits
+    assert ("pr", ids["pr"]) in hits
+    assert ("commit", ids["commit"]) not in hits
+    assert ("issue", ids["issue"]) not in hits
+
+
+async def test_bm25_retriever_scores_descending(session: AsyncSession) -> None:
+    ids = await _seed_bm25_repo(session)
+    r = BM25Retriever()
+    results = await r.retrieve(session, ids["repo"], "bcrypt password", top_k=10)
+    scores = [res.score for res in results]
+    assert scores == sorted(scores, reverse=True)
+    assert all(res.score > 0 for res in results)
+    assert all("bm25_score" in res.score_breakdown for res in results)
+
+
+async def test_bm25_retriever_filters_to_chunks_only(session: AsyncSession) -> None:
+    """entity_types={'chunk'} means the PR match on 'syncify' drops out."""
+    ids = await _seed_bm25_repo(session)
+    r = BM25Retriever()
+    results = await r.retrieve(
+        session,
+        ids["repo"],
+        "syncify",
+        top_k=10,
+        filters=RetrievalFilters(entity_types={"chunk"}),
+    )
+    assert [res.entity_type for res in results] == ["chunk"]
+
+
+async def test_bm25_retriever_empty_filter_returns_empty(session: AsyncSession) -> None:
+    ids = await _seed_bm25_repo(session)
+    r = BM25Retriever()
+    results = await r.retrieve(
+        session,
+        ids["repo"],
+        "syncify",
+        top_k=10,
+        filters=RetrievalFilters(entity_types=set()),
+    )
+    assert results == []
+
+
+async def test_bm25_retriever_no_matches_returns_empty(session: AsyncSession) -> None:
+    """A query with no lexical hits should return zero rows (not raise)."""
+    ids = await _seed_bm25_repo(session)
+    r = BM25Retriever()
+    results = await r.retrieve(session, ids["repo"], "quantum photosynthesis", top_k=10)
+    assert results == []
+
+
+async def test_bm25_retriever_top_k_bounds(session: AsyncSession) -> None:
+    """top_k caps the union-of-arms result set."""
+    ids = await _seed_bm25_repo(session)
+    r = BM25Retriever()
+    # 'bcrypt' matches commit + issue -- top_k=1 must trim to one.
+    results = await r.retrieve(session, ids["repo"], "bcrypt", top_k=1)
+    assert len(results) == 1
+
+
+async def test_bm25_retriever_scopes_to_repo(session: AsyncSession) -> None:
+    """A second repo's fts_tsv rows are invisible."""
+    ids_a = await _seed_bm25_repo(session, owner="a", name="one")
+    await _seed_bm25_repo(session, owner="b", name="two")  # noise; must not leak
+    r = BM25Retriever()
+    results_a = await r.retrieve(session, ids_a["repo"], "syncify", top_k=10)
+    ids_seen = {(res.entity_type, res.entity_id) for res in results_a}
+    # Every hit belongs to repo A.
+    assert ids_seen == {("chunk", ids_a["chunk"]), ("pr", ids_a["pr"])}
