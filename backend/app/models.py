@@ -1,10 +1,12 @@
 from datetime import datetime
+from typing import Any
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     DateTime,
     Float,
     ForeignKey,
@@ -14,8 +16,27 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+# --- Slice 6a: shared FTS expressions -------------------------------------
+# Kept next to the models so create_all + Alembic never drift on the tsvector
+# formula. Weights: A (title/name/subject) > B (body/message/docstring) > D
+# (raw code body, chunks only). See ADR 0014.
+
+_CHUNK_FTS_EXPR = (
+    "setweight(to_tsvector('english', coalesce(fts_name, '')), 'A') || "
+    "setweight(to_tsvector('english', coalesce(fts_doc, '')), 'B') || "
+    "setweight(to_tsvector('english', coalesce(fts_body, '')), 'D')"
+)
+_COMMIT_FTS_EXPR = (
+    "setweight(to_tsvector('english', coalesce(split_part(message, E'\\n', 1), '')), 'A') || "
+    "setweight(to_tsvector('english', coalesce(message, '')), 'B')"
+)
+_PR_ISSUE_FTS_EXPR = (
+    "setweight(to_tsvector('english', coalesce(title, '')), 'A') || "
+    "setweight(to_tsvector('english', coalesce(body, '')), 'B')"
+)
 
 # Embedding vector dimension. bge-small-en-v1.5 is 384-dim (ADR 0009).
 # Fixed at column-creation time; a model change with a different dimension
@@ -115,6 +136,9 @@ class CodeChunk(Base):
         Index("ix_code_chunk_repo_type", "repo_id", "chunk_type"),
         # Natural ordering within a file (sort/scan by line).
         Index("ix_code_chunk_file_start", "file_id", "start_line"),
+        # Slice 6a: GIN index for BM25 full-text search over the generated
+        # weighted tsvector. See ADR 0014.
+        Index("ix_code_chunk_fts_tsv", "fts_tsv", postgresql_using="gin"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -137,6 +161,16 @@ class CodeChunk(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+    # Slice 6a: FTS intermediates + generated tsvector. `fts_name` holds the
+    # symbol plus camelCase/snake_case splits so `getUserByEmail` matches a
+    # query like `user email lookup`; `fts_doc` holds the extracted docstring
+    # + leading comments; `fts_body` is the raw code as a lower-weight
+    # fallback. See ADR 0014.
+    fts_name: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    fts_doc: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    fts_body: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    fts_tsv: Mapped[Any] = mapped_column(TSVECTOR, Computed(_CHUNK_FTS_EXPR, persisted=True))
 
     repo: Mapped[Repo] = relationship(back_populates="code_chunks")
     file: Mapped["File"] = relationship(back_populates="code_chunks")
@@ -194,6 +228,7 @@ class Commit(Base):
     __table_args__ = (
         UniqueConstraint("repo_id", "sha", name="uq_commit_repo_sha"),
         Index("ix_commit_repo_authored", "repo_id", "authored_at"),
+        Index("ix_commit_fts_tsv", "fts_tsv", postgresql_using="gin"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -212,6 +247,9 @@ class Commit(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
+    # Slice 6a: subject (weight A) + full message (weight B). See ADR 0014.
+    fts_tsv: Mapped[Any] = mapped_column(TSVECTOR, Computed(_COMMIT_FTS_EXPR, persisted=True))
+
     repo: Mapped[Repo] = relationship(back_populates="commits")
 
 
@@ -222,6 +260,7 @@ class PullRequest(Base):
     __table_args__ = (
         UniqueConstraint("repo_id", "number", name="uq_pr_repo_number"),
         Index("ix_pr_repo_merged", "repo_id", "merged_at"),
+        Index("ix_pr_fts_tsv", "fts_tsv", postgresql_using="gin"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -243,6 +282,9 @@ class PullRequest(Base):
     ingested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+    # Slice 6a: title (weight A) + body (weight B). See ADR 0014.
+    fts_tsv: Mapped[Any] = mapped_column(TSVECTOR, Computed(_PR_ISSUE_FTS_EXPR, persisted=True))
 
     repo: Mapped[Repo] = relationship(back_populates="pull_requests")
     comments: Mapped[list["PRComment"]] = relationship(
@@ -280,6 +322,7 @@ class Issue(Base):
     __table_args__ = (
         UniqueConstraint("repo_id", "number", name="uq_issue_repo_number"),
         Index("ix_issue_repo_state", "repo_id", "state"),
+        Index("ix_issue_fts_tsv", "fts_tsv", postgresql_using="gin"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -296,6 +339,9 @@ class Issue(Base):
     ingested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+    # Slice 6a: title (weight A) + body (weight B). See ADR 0014.
+    fts_tsv: Mapped[Any] = mapped_column(TSVECTOR, Computed(_PR_ISSUE_FTS_EXPR, persisted=True))
 
     repo: Mapped[Repo] = relationship(back_populates="issues")
     comments: Mapped[list["IssueComment"]] = relationship(
