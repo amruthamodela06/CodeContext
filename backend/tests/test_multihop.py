@@ -239,13 +239,32 @@ async def test_rerank_drops_candidates_without_embeddings(
 # --- retrieve_entities (orchestrator smoke) --------------------------------
 
 
+class _StubRetriever:
+    """Retriever stand-in. Returns a preset list of RetrievalResult
+    pointers so tests don't need seeded embeddings + FTS. The .name is
+    surfaced into the trace so we can assert on it.
+    """
+
+    def __init__(self, results, name="stub"):
+        self._results = results
+        self.name = name
+        self.called_with: list[tuple] = []
+
+    async def retrieve(self, session, repo_id, query, top_k, filters=None):
+        self.called_with.append((repo_id, query, top_k, filters))
+        return self._results
+
+
 async def test_retrieve_entities_routes_out_of_scope_to_empty(
     session: AsyncSession,
 ) -> None:
     from app.retrieval import retrieve_entities
 
-    async def _never_called(*args, **kwargs):
-        raise AssertionError("flat retrieval should not run for out_of_scope")
+    class _NeverCalled:
+        name = "never"
+
+        async def retrieve(self, *args, **kwargs):
+            raise AssertionError("flat retrieval should not run for out_of_scope")
 
     ctx, trace = await retrieve_entities(
         session,
@@ -253,7 +272,7 @@ async def test_retrieve_entities_routes_out_of_scope_to_empty(
         query="recipe?",
         top_k=5,
         category="out_of_scope",
-        retrieve_chunks_fn=_never_called,
+        retriever=_NeverCalled(),
     )
     assert ctx.chunks == [] and ctx.commits == []
     assert trace["category"] == "out_of_scope"
@@ -263,35 +282,36 @@ async def test_retrieve_entities_lookup_skips_graph_expansion(
     session: AsyncSession,
 ) -> None:
     """A `lookup` category returns chunks only; multi-hop is not invoked."""
-    from types import SimpleNamespace
+    from app.retrieval import RetrievalResult, retrieve_entities
 
-    from app.retrieval import retrieve_entities
-
-    fake_chunk = SimpleNamespace(
-        chunk_id=42,
-        file_path="a.py",
-        start_line=1,
-        end_line=5,
-        language="Python",
-        chunk_type="function",
-        name="f",
-        content="def f(): pass",
-        similarity=0.9,
+    # Seed a real chunk so _hydrate_chunks can join through -- the retriever
+    # returns pointers, hydration reads content + file_path from the DB.
+    ids = await _build_fixture_graph(session)
+    stub = _StubRetriever(
+        [
+            RetrievalResult(
+                entity_type="chunk",
+                entity_id=ids["chunk"],
+                score=0.9,
+                score_breakdown={"vector_score": 0.9},
+            )
+        ],
+        name="stub-vec",
     )
-
-    async def _flat(_session, _repo_id, _query, _top_k):
-        return [fake_chunk]
 
     ctx, trace = await retrieve_entities(
         session,
-        repo_id=1,
+        repo_id=ids["repo"],
         query="where is f",
         top_k=5,
         category="lookup",
-        retrieve_chunks_fn=_flat,
+        retriever=stub,
     )
     assert len(ctx.chunks) == 1
+    assert ctx.chunks[0].chunk_id == ids["chunk"]
     assert ctx.commits == [] and ctx.prs == [] and ctx.issues == []
     # No expansion was attempted -> trace should not have the multi-hop keys.
     assert "expansion_candidates" not in trace
-    assert trace["seed_chunk_ids"] == [42]
+    assert trace["seed_chunk_ids"] == [ids["chunk"]]
+    # retrieval_mode surfaced from the retriever.
+    assert trace["retrieval_mode"] == "stub-vec"

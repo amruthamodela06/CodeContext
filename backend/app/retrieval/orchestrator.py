@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Iterable
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,7 +35,11 @@ from app.citations.context import (
 from app.classifier import Category
 from app.embeddings import get_embedder
 from app.graph.multihop import rerank_by_embedding, traverse_outbound
-from app.models import Commit, EntityEdge, Issue, PullRequest
+from app.models import CodeChunk, Commit, EntityEdge, File, Issue, PullRequest
+from app.retrieval.protocol import RetrievalFilters, RetrievalResult
+
+if TYPE_CHECKING:
+    from app.retrieval.protocol import Retriever
 
 log = logging.getLogger(__name__)
 
@@ -47,22 +51,39 @@ async def retrieve_entities(
     *,
     top_k: int,
     category: Category,
-    retrieve_chunks_fn,  # the existing api.retrieve_chunks helper; injected
+    retriever: Retriever | None = None,
 ) -> tuple[CitationContext, dict]:
     """Returns (context, debug_trace).
 
+    Stage 1 routes chunk retrieval through the configured
+    ``Retriever`` (Slice 6 -- vector / bm25 / hybrid / hybrid_rerank).
+    Tests can inject a stub retriever; production uses ``get_retriever()``.
+
     The trace exposes routing decisions for the /query response's debug
-    panel: classified category, seed chunk IDs, expansion candidate count,
-    reranked entity count.
+    panel: retrieval mode, classified category, seed chunk IDs,
+    expansion candidate count, reranked entity count.
     """
+    from app.retrieval import get_retriever
+
     trace: dict = {"category": category}
 
     if category == "out_of_scope":
         return CitationContext(), trace
 
-    # Stage 1 -- flat chunk retrieval (always).
-    flat_results = await retrieve_chunks_fn(session, repo_id, query, top_k)
-    chunks = _materialize_chunks(flat_results)
+    r = retriever if retriever is not None else get_retriever()
+    trace["retrieval_mode"] = r.name
+
+    # Stage 1 -- flat chunk retrieval via the configured retriever. Filter to
+    # chunks only; history entities come from Slice 5's multi-hop expansion
+    # below, not from flat stage-1.
+    flat_results = await r.retrieve(
+        session,
+        repo_id,
+        query,
+        top_k,
+        filters=RetrievalFilters(entity_types={"chunk"}),
+    )
+    chunks = await _hydrate_chunks(session, flat_results)
     trace["seed_chunk_ids"] = [c.chunk_id for c in chunks]
 
     if category != "historical_why" or not chunks:
@@ -101,23 +122,54 @@ async def retrieve_entities(
 # ---- Helpers -------------------------------------------------------------
 
 
-def _materialize_chunks(results: Iterable) -> list[CitedChunk]:
-    """Slice-4-shaped SearchResult rows -> CitedChunk(c1..cN)."""
-    return [
-        CitedChunk(
-            display_id=f"c{i + 1}",
-            chunk_id=r.chunk_id,
-            file_path=r.file_path,
-            start_line=r.start_line,
-            end_line=r.end_line,
-            language=r.language,
-            chunk_type=r.chunk_type,
-            name=r.name,
-            content=r.content,
-            similarity=r.similarity,
+async def _hydrate_chunks(
+    session: AsyncSession, results: list[RetrievalResult]
+) -> list[CitedChunk]:
+    """RetrievalResult pointers -> CitedChunk rows (with content + file
+    path). Preserves the retriever's rank ordering; assigns display IDs
+    c1..cN over the surviving chunks.
+
+    Non-chunk results are ignored -- callers filter at the Retriever
+    layer, this is defensive against future callers that pass mixed
+    types.
+    """
+    chunk_ids = [r.entity_id for r in results if r.entity_type == "chunk"]
+    if not chunk_ids:
+        return []
+    rows = (
+        await session.execute(
+            select(CodeChunk, File.path)
+            .join(File, File.id == CodeChunk.file_id)
+            .where(CodeChunk.id.in_(chunk_ids))
         )
-        for i, r in enumerate(results)
-    ]
+    ).all()
+    by_id = {chunk.id: (chunk, path) for chunk, path in rows}
+
+    out: list[CitedChunk] = []
+    display_i = 0
+    for res in results:
+        if res.entity_type != "chunk":
+            continue
+        pair = by_id.get(res.entity_id)
+        if pair is None:
+            continue
+        chunk, path = pair
+        display_i += 1
+        out.append(
+            CitedChunk(
+                display_id=f"c{display_i}",
+                chunk_id=chunk.id,
+                file_path=path,
+                start_line=chunk.start_line,
+                end_line=chunk.end_line,
+                language=chunk.language,
+                chunk_type=chunk.chunk_type,
+                name=chunk.name,
+                content=chunk.content,
+                similarity=res.score,
+            )
+        )
+    return out
 
 
 async def _hydrate_entities(

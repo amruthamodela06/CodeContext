@@ -50,6 +50,22 @@ class Settings(BaseSettings):
     # LLM call per query; better on ambiguous phrasings, costs latency.
     query_classifier: str = Field(default="keyword")
 
+    # --- Retrieval (Slice 6, ADR 0014) ---
+    # 'vector' -- Slice 3/4 baseline (pgvector cosine).
+    # 'bm25'   -- Postgres FTS via ts_rank_cd.
+    # 'hybrid' -- vector + bm25 in parallel, RRF-fused (default).
+    # 'hybrid_rerank' -- hybrid + cross-encoder rerank on top-N (opt-in,
+    #                    adds ~1-2 s per query on CPU).
+    retrieval_mode: str = Field(default="hybrid")
+    # RRF smoothing constant. Literature default 60; exposed for Slice 7 ablation.
+    rrf_k: int = Field(default=60, ge=1)
+    # How many candidates each retriever fetches before fusion / rerank.
+    retrieval_candidate_n: int = Field(default=50, ge=1)
+    # How many candidates the cross-encoder scores when hybrid_rerank is on.
+    reranker_input_n: int = Field(default=20, ge=1)
+    # Model id for the cross-encoder. Loaded lazily; ~280 MB in HF cache.
+    reranker_model: str = Field(default="BAAI/bge-reranker-base")
+
     backend_host: str = "0.0.0.0"
     backend_port: int = 8000
     frontend_origin: str = "http://localhost:3000"

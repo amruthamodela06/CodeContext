@@ -19,7 +19,6 @@ from app.citations import build_historical_why_messages, build_messages, parse, 
 from app.classifier import get_classifier
 from app.config import get_settings
 from app.db import get_session
-from app.embeddings import get_embedder
 from app.embeddings.orchestrator import embed_repo
 from app.graph import build_graph, select_edge_counts_by_type
 from app.history import ingest_history, select_history_counts
@@ -419,45 +418,55 @@ async def history_ingestion_status(
 async def retrieve_chunks(
     session: AsyncSession, repo_id: int, query: str, top_k: int
 ) -> list[SearchResult]:
-    """Embed `query` and return the top-k chunks for the repo by cosine
-    similarity. Shared by /search and /query so both rank identically.
-    """
-    embedder = get_embedder()
-    query_vec = await asyncio.to_thread(embedder.embed_one, query)
+    """Retrieve top-k chunks via the configured retriever (Slice 6, ADR 0014).
 
-    # pgvector cosine distance (<=>). similarity = 1 - distance.
-    # entity_embedding is polymorphic since Slice 5; filter to chunk rows in
-    # the join so the cosine search only ranks code (commits/PRs/issues come
-    # in via multi-hop expansion in Slice 5f, not flat retrieval).
-    distance = EntityEmbedding.embedding.cosine_distance(query_vec).label("distance")
+    Semantics of ``similarity`` depend on ``RETRIEVAL_MODE`` -- cosine for
+    ``vector``, ts_rank_cd for ``bm25``, RRF sum for ``hybrid``, cross-encoder
+    logit for ``hybrid_rerank``. All modes return score-descending; the raw
+    number is a debug surface, not a public contract.
+    """
+    from app.retrieval import RetrievalFilters, get_retriever
+
+    retriever = get_retriever()
+    results = await retriever.retrieve(
+        session,
+        repo_id,
+        query,
+        top_k,
+        filters=RetrievalFilters(entity_types={"chunk"}),
+    )
+    if not results:
+        return []
+
+    chunk_ids = [r.entity_id for r in results]
     rows = (
         await session.execute(
-            select(CodeChunk, File.path, distance)
-            .join(
-                EntityEmbedding,
-                (EntityEmbedding.entity_id == CodeChunk.id)
-                & (EntityEmbedding.entity_type == "chunk"),
-            )
+            select(CodeChunk, File.path)
             .join(File, File.id == CodeChunk.file_id)
-            .where(EntityEmbedding.repo_id == repo_id)
-            .order_by(distance)
-            .limit(top_k)
+            .where(CodeChunk.id.in_(chunk_ids))
         )
     ).all()
-    return [
-        SearchResult(
-            chunk_id=chunk.id,
-            similarity=1.0 - float(dist),
-            file_path=path,
-            chunk_type=chunk.chunk_type,
-            name=chunk.name,
-            start_line=chunk.start_line,
-            end_line=chunk.end_line,
-            language=chunk.language,
-            content=chunk.content,
+    by_id = {chunk.id: (chunk, path) for chunk, path in rows}
+    out: list[SearchResult] = []
+    for r in results:
+        pair = by_id.get(r.entity_id)
+        if pair is None:
+            continue
+        chunk, path = pair
+        out.append(
+            SearchResult(
+                chunk_id=r.entity_id,
+                similarity=r.score,
+                file_path=path,
+                chunk_type=chunk.chunk_type,
+                name=chunk.name,
+                start_line=chunk.start_line,
+                end_line=chunk.end_line,
+                language=chunk.language,
+                content=chunk.content,
+            )
         )
-        for chunk, path, dist in rows
-    ]
+    return out
 
 
 @router.post("/search", response_model=SearchResponse)
@@ -554,7 +563,6 @@ async def query(req: QueryRequest, session: SessionDep):
         req.question,
         top_k=req.top_k,
         category=category,  # type: ignore[arg-type]  -- override may be any str
-        retrieve_chunks_fn=retrieve_chunks,
     )
     trace = {"classifier": classifier_meta, **retrieval_trace}
 
