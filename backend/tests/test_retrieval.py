@@ -498,3 +498,123 @@ async def test_hybrid_retriever_tunable_rrf_k(session: AsyncSession) -> None:
     ]
     # Scores are strictly smaller under the larger k.
     assert small_k[0].score > large_k[0].score
+
+
+# --- RerankedRetriever ----------------------------------------------------
+
+
+class _StubCrossEncoder:
+    """CrossEncoder stand-in. Scores by keyword occurrence count so tests
+    can assert deterministic re-ordering without loading the real 280 MB
+    ``bge-reranker-base``. Test-only.
+    """
+
+    def __init__(self, keyword: str) -> None:
+        self._kw = keyword.lower()
+        self.pairs_seen: list[tuple[str, str]] = []
+
+    def predict(self, sentences: list[tuple[str, str]]) -> list[float]:
+        self.pairs_seen.extend(sentences)
+        return [float(text.lower().count(self._kw)) for _, text in sentences]
+
+
+async def test_reranked_retriever_reorders_by_cross_encoder(
+    session: AsyncSession,
+) -> None:
+    """Stub reranker prefers 'syncify' matches -- the chunk (which has
+    'syncify' in name + body) and PR (title 'Add syncify helper') must
+    rank above the bcrypt commit + issue after rerank."""
+    from app.retrieval import RerankedRetriever
+
+    ids = await _seed_hybrid_repo(session)
+    stub = _StubCrossEncoder(keyword="syncify")
+    r = RerankedRetriever(HybridRetriever(candidate_n=10), model=stub, input_n=10)
+    results = await r.retrieve(session, ids["repo"], "syncify function", top_k=4)
+
+    types_top2 = {(res.entity_type, res.entity_id) for res in results[:2]}
+    # syncify appears in the chunk content + PR title/body.
+    assert ("chunk", ids["chunk"]) in types_top2
+    assert ("pr", ids["pr"]) in types_top2
+    # rerank_score present on every returned entity, plus the RRF fields.
+    assert all("rerank_score" in res.score_breakdown for res in results)
+    assert all("rrf_score" in res.score_breakdown for res in results)
+
+
+async def test_reranked_retriever_preserves_inner_breakdown(
+    session: AsyncSession,
+) -> None:
+    """The cross-encoder's score_breakdown ADDS to the inner's -- doesn't
+    replace. Vector/BM25 ranks are still there for the debug panel."""
+    from app.retrieval import RerankedRetriever
+
+    ids = await _seed_hybrid_repo(session)
+    stub = _StubCrossEncoder(keyword="syncify")
+    r = RerankedRetriever(HybridRetriever(), model=stub, input_n=10)
+    results = await r.retrieve(session, ids["repo"], "syncify", top_k=5)
+
+    top = results[0].score_breakdown
+    # From the inner Hybrid path:
+    assert "rrf_score" in top
+    assert "vector_rank" in top or "bm25_rank" in top
+    # Added by rerank:
+    assert "rerank_score" in top
+
+
+async def test_reranked_retriever_empty_inner_returns_empty(
+    session: AsyncSession,
+) -> None:
+    """Inner has no candidates (empty entity_types filter) -> reranker
+    returns empty without invoking the model."""
+    from app.retrieval import RerankedRetriever
+
+    ids = await _seed_hybrid_repo(session)
+    stub = _StubCrossEncoder(keyword="ignored")
+    r = RerankedRetriever(HybridRetriever(), model=stub, input_n=10)
+    results = await r.retrieve(
+        session,
+        ids["repo"],
+        "syncify",
+        top_k=5,
+        filters=RetrievalFilters(entity_types=set()),
+    )
+    assert results == []
+    assert stub.pairs_seen == []  # model.predict never invoked
+
+
+async def test_reranked_retriever_input_n_widens_candidate_pool(
+    session: AsyncSession,
+) -> None:
+    """input_n=2 means the reranker only sees the top-2 inner candidates.
+    top_k=1 means it returns 1. Verifies both bounds independently."""
+    from app.retrieval import RerankedRetriever
+
+    ids = await _seed_hybrid_repo(session)
+    stub = _StubCrossEncoder(keyword="syncify")
+    r = RerankedRetriever(HybridRetriever(), model=stub, input_n=2)
+    results = await r.retrieve(session, ids["repo"], "syncify", top_k=1)
+    assert len(results) == 1
+    # Reranker saw exactly 2 pairs, not more.
+    assert len(stub.pairs_seen) == 2
+
+
+async def test_reranked_retriever_hydrates_correct_text_per_type(
+    session: AsyncSession,
+) -> None:
+    """The reranker input MUST be the entity's content, not e.g. an ID
+    or display header. Verifies the ADR 0014 content-only rule."""
+    from app.retrieval import RerankedRetriever
+
+    ids = await _seed_hybrid_repo(session)
+    stub = _StubCrossEncoder(keyword="syncify")
+    r = RerankedRetriever(HybridRetriever(), model=stub, input_n=10)
+    await r.retrieve(session, ids["repo"], "syncify", top_k=10)
+
+    seen_texts = {text for _, text in stub.pairs_seen}
+    # Chunk content shows through raw -- the def line is present.
+    assert any("def syncify" in t for t in seen_texts)
+    # Commit shows the full message.
+    assert any("bcrypt" in t for t in seen_texts)
+    # PR shows title + body concatenated.
+    assert any("Add syncify helper" in t and "anyio" in t for t in seen_texts)
+    # Issue shows title + body concatenated.
+    assert any("Passwords not hashed" in t and "plaintext" in t for t in seen_texts)

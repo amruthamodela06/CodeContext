@@ -16,6 +16,7 @@ from app.retrieval.protocol import (
     RetrievalResult,
     Retriever,
 )
+from app.retrieval.reranked import RerankedRetriever
 from app.retrieval.rrf import reciprocal_rank_fusion
 from app.retrieval.vector import VectorRetriever
 
@@ -23,6 +24,7 @@ __all__ = [
     "BM25Retriever",
     "EntityType",
     "HybridRetriever",
+    "RerankedRetriever",
     "RetrievalFilters",
     "RetrievalResult",
     "Retriever",
