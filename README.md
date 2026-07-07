@@ -6,7 +6,7 @@ This is a v1 portfolio project under active development. See [docs/PRD.md](docs/
 
 ## Status
 
-Multi-hop retrieval works end-to-end: a `historical_why` question routes through the typed graph (chunk → commit → PR → issue) and the LLM cites every step with a clickable typed chip.
+Hybrid retrieval + optional cross-encoder rerank is live: BM25 (Postgres FTS) + vector (pgvector) run in parallel, fused via RRF, with all four modes (`vector` / `bm25` / `hybrid` / `hybrid_rerank`) switchable via a single env var. Slice 7 (evaluation) is next.
 
 | Slice | What it added | State |
 |---|---|---|
@@ -15,7 +15,8 @@ Multi-hop retrieval works end-to-end: a `historical_why` question routes through
 | 3 | Embeddings + naive vector search | ✅ done |
 | 4 | LLM answers with mechanically-verified citations (streaming) | ✅ done |
 | 5 | Multi-hop graph retrieval + typed citations (commits / PRs / issues) | ✅ done |
-| 6 | Hybrid retrieval (BM25 + vector, RRF) + cross-encoder reranker | ⏳ next |
+| 6 | Hybrid retrieval (BM25 + vector, RRF) + cross-encoder reranker | ✅ done |
+| 7 | Evaluation harness (recall@5/10, citation accuracy, LLM-as-judge, per-mode ablation) | ⏳ next |
 
 **What works today**: ingest a public GitHub repo → AST-chunk + embed → ingest 12 months of commits / PRs / issues via GraphQL → build the `chunk → commit → pr → issue` graph via blame + PR-body parsing → ask a question. The classifier (keyword default, LLM opt-in) routes the query; `historical_why` triggers multi-hop expansion + embedding rerank; the LLM streams an answer with typed citation chips (`[chunk:cN]` / `[commit:mN]` / `[pr:pN]` / `[issue:iN]`), each clickable to a per-type viewer with an "Open on GitHub" link.
 
@@ -95,6 +96,7 @@ cd backend && RUN_SLOW=1 uv run pytest -k bge_small   # downloads + runs the rea
 - **History**: commits / PRs / issues mirrored via GitHub GraphQL into local tables; per-file `git blame` + PR-body parsing populates a polymorphic `entity_edge` graph (ADR 0011)
 - **Query classifier**: keyword default (sub-ms) or LLM opt-in (`QUERY_CLASSIFIER` env); routes to flat vs. multi-hop retrieval (ADR 0012)
 - **Multi-hop retrieval**: recursive-CTE traversal over `entity_edge` (depth 2 / breadth 10) + embedding rerank of expanded set; only for `historical_why` queries (ADR 0012)
+- **Retrieval (stage-1)**: pluggable Retriever behind `RETRIEVAL_MODE` env — `vector` / `bm25` / `hybrid` (default, RRF-fused) / `hybrid_rerank` (adds `BAAI/bge-reranker-base` cross-encoder). Postgres FTS uses per-entity generated `tsvector` columns (weighted A/B/D for chunks — symbol + camelCase splits, docstring, raw code) with GIN indexes (ADR 0014)
 - **Citations**: typed `[chunk:cN]` / `[commit:mN]` / `[pr:pN]` / `[issue:iN]`, parsed (code-fence-aware, shape-only), validated against the retrieved set, resolved to per-type permalinks (ADR 0010 + 0012)
 - **Frontend**: Next.js 16 (App Router), React 19, TypeScript strict, Tailwind 4; Monaco for cited-chunk rendering; per-type Sources panels + chip viewers
 - **Eval**: pytest-based harness in `eval/` (Slice 7)
@@ -107,7 +109,7 @@ All ML runs on CPU — no GPU assumed (see [ADR 0007](docs/decisions/0007-oss-em
 backend/    FastAPI app, SQLAlchemy models, Alembic migrations, pytest suite
 frontend/   Next.js App Router UI
 infra/      docker-compose (Postgres + pgvector)
-docs/       PRD, roadmap, and decisions/ (ADRs 0001–0013)
+docs/       PRD, roadmap, and decisions/ (ADRs 0001–0014)
 eval/       evaluation harness (later slice)
 ```
 
